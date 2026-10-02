@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DOOM · spectator</title>
+<style>
+  :root {
+    --bg: #0d0d0f;
+    --panel: #16161a;
+    --border: #2a2a30;
+    --text: #e6e6e6;
+    --muted: #8b8b95;
+    --accent: #e8452c;
+    --comment: #f2c14e;
+    --ok: #4caf50;
+    --route: #f2c14e;
+    --user: #7fb3ff;
+    --error: #ff6b5b;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .app { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px;
+    height: 100%; padding: 16px; }
+  .stage { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  h1 { margin: 0; font-size: 15px; letter-spacing: .08em; text-transform: uppercase; }
+  h1 span { color: var(--accent); }
+  .status { margin-left: auto; display: flex; align-items: center; gap: 6px;
+    color: var(--muted); font-size: 12px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.live { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .screen-wrap { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
+  #screen { display: block; width: 100%; max-height: 100%; aspect-ratio: 4 / 3; object-fit: fill;
+    image-rendering: pixelated; background: #000; border: 1px solid var(--border); border-radius: 4px; }
+  .now { margin-top: 12px; min-height: 2.9em; padding: 8px 12px; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 4px; color: var(--comment); }
+  .now:empty::before { content: "Waiting for Claude to make a move…"; color: var(--muted); }
+
+  .tell { display: flex; gap: 8px; margin-top: 10px; }
+  .tell input { flex: 1; min-width: 0; font: inherit; color: var(--text); background: var(--panel);
+    border: 1px solid var(--border); border-radius: 4px; padding: 8px 12px; outline: none; }
+  .tell input:focus { border-color: var(--user); }
+  .tell input:disabled { opacity: .6; }
+  .tell button { font-size: 13px; padding: 0 16px; }
+  .tell-status { min-height: 1.4em; margin-top: 4px; font-size: 12px; color: var(--muted); }
+  .tell-status.error { color: var(--error); }
+
+  aside { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+  .panel { display: flex; flex-direction: column; min-height: 0; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 4px; }
+  .panel h2 { display: flex; align-items: center; gap: 8px; margin: 0; padding: 8px 12px;
+    font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--muted); border-bottom: 1px solid var(--border); }
+  .panel h2 .extra { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 400; }
+  button { font: inherit; font-size: 11px; color: var(--text); background: #222228;
+    border: 1px solid var(--border); border-radius: 3px; padding: 2px 8px; cursor: pointer; }
+  button:hover { border-color: var(--muted); }
+
+  #map { display: block; width: 100%; height: 240px; background: #0a0a0c; border-radius: 0 0 4px 4px; }
+  .goal { padding: 6px 12px; font-size: 12.5px; color: var(--muted); border-top: 1px solid var(--border); }
+  .goal b { color: var(--route); font-weight: 600; }
+  .goal:empty { display: none; }
+
+  #plan { margin: 0; padding: 8px 12px; max-height: 160px; overflow-y: auto; white-space: pre-wrap;
+    font: 12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #plan:empty::before { content: "No plan yet."; color: var(--muted); font-family: ui-sans-serif, system-ui, sans-serif; }
+
+  .log-panel { flex: 1; }
+  #log { flex: 1; overflow-y: auto; padding: 8px 12px; margin: 0; list-style: none; min-height: 120px; }
+  #log li { padding: 4px 0; white-space: pre-wrap; word-break: break-word; }
+  #log li.action { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
+    border-top: 1px solid var(--border); padding-top: 8px; margin-top: 4px; }
+  #log li.action::before { content: "▶ "; color: var(--accent); }
+  #log li.comment { color: var(--comment); }
+  #log li.comment::before { content: "💬 "; }
+  #log li.result { color: var(--muted); font-size: 12.5px; }
+  #log li.user { color: var(--user); font-weight: 600; border-top: 1px solid var(--border);
+    padding-top: 8px; margin-top: 4px; }
+  #log li.user::before { content: "🧑 You: "; }
+  #log li.delivered { color: var(--muted); font-size: 12px; }
+  #log li.delivered::before { content: "✓ "; color: var(--ok); }
+
+  @media (max-width: 900px) {
+    .app { grid-template-columns: 1fr; height: auto; }
+    #screen { max-height: none; }
+    .log-panel { height: 360px; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <section class="stage">
+    <header>
+      <h1><span>DOOM</span> · Claude is playing</h1>
+      <div class="status"><div class="dot" id="dot"></div><span id="conn">connecting…</span></div>
+    </header>
+    <div class="screen-wrap"><canvas id="screen" width="320" height="200"></canvas></div>
+    <div class="now" id="now"></div>
+    <form class="tell" id="tell" autocomplete="off">
+      <input id="tell-text" maxlength="500" placeholder="Tell Claude what to do… (e.g. take the left door)">
+      <button type="submit" id="tell-send">Send</button>
+    </form>
+    <div class="tell-status" id="tell-status"></div>
+  </section>
+  <aside>
+    <div class="panel">
+      <h2>Map <span id="level-name"></span><span class="extra"><button id="zoom">Whole level</button></span></h2>
+      <canvas id="map"></canvas>
+      <div class="goal" id="goal"></div>
+    </div>
+    <div class="panel">
+      <h2>Claude's plan</h2>
+      <pre id="plan"></pre>
+    </div>
+    <div class="panel log-panel">
+      <h2>Action log</h2>
+      <ul id="log"></ul>
+    </div>
+  </aside>
+</div>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const ctx = $("screen").getContext("2d");
+  const log = $("log"), now = $("now");
+
+  // ---- Game video ----
+  let pending = false, next = null;
+  function draw(src) {
+    // Drop frames rather than queue them if decoding falls behind.
+    if (pending) { next = src; return; }
+    pending = true;
+    const img = new Image();
+    img.onload = img.onerror = () => {
+      if (img.complete && img.naturalWidth) ctx.drawImage(img, 0, 0);
+      pending = false;
+      if (next) { const n = next; next = null; draw(n); }
+    };
+    img.src = src;
+  }
+
+  // ---- Log ----
+  function addLog(entry) {
+    const li = document.createElement("li");
+    li.className = entry.kind;
+    li.textContent = entry.text;
+    const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+    log.appendChild(li);
+    while (log.children.length > 300) log.firstChild.remove();
+    if (atBottom) log.scrollTop = log.scrollHeight;
+    if (entry.kind === "comment" && entry.text !== "Updated the plan") now.textContent = entry.text;
+  }
+
+  // ---- Messages to Claude ----
+  // The token comes from the link the server opened; without it the server
+  // refuses messages (so other web pages can't steer the agent).
+  const token = new URLSearchParams(location.search).get("token");
+  const tellText = $("tell-text"), tellSend = $("tell-send"), tellStatus = $("tell-status");
+  function setTellStatus(text, isError) {
+    tellStatus.textContent = text;
+    tellStatus.classList.toggle("error", !!isError);
+  }
+  if (!token) {
+    tellText.disabled = tellSend.disabled = true;
+    tellText.placeholder = "Open the spectator link from the server (it includes ?token=…) to send messages";
+  }
+  $("tell").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const text = tellText.value.trim();
+    if (!text || !token) return;
+    tellSend.disabled = true;
+    try {
+      const res = await fetch("/command", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Doom-Token": token },
+        body: JSON.stringify({ text }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (res.ok) {
+        tellText.value = "";
+        setTellStatus(body.pending > 1
+          ? `Sent. ${body.pending} messages waiting for Claude's next move.`
+          : "Sent. Claude will see it on its next move.");
+      } else {
+        setTellStatus(body.error || `Couldn't send (HTTP ${res.status})`, true);
+      }
+    } catch (err) {
+      setTellStatus("Couldn't reach the Doom server. Is it still running?", true);
+    } finally {
+      tellSend.disabled = false;
+      tellText.focus();
+    }
+  });
+
+  // ---- Minimap ----
+  const map = $("map"), mctx = map.getContext("2d");
+  const LINE_STYLE = {
+    "#": ["#7d7d88", 1], "%": ["#6b5a3a", 1], "-": ["#2c2c33", 1], ".": ["#2c2c33", 1],
+    "D": ["#c9a227", 2], "K": ["#4aa3ff", 2.5], "L": ["#3cc7c7", 2], "S": ["#6fd26f", 2.5], "E": ["#ff4d3a", 3.5],
+  };
+  let level = null, route = [], player = null, wholeLevel = false;
+
+  function fit() {
+    const r = map.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    map.width = Math.round(r.width * dpr);
+    map.height = Math.round(r.height * dpr);
+    redraw();
+  }
+
+  function view() {
+    const w = map.width, h = map.height;
+    if (wholeLevel || !player) {
+      const b = level.bounds, pad = 12 * (window.devicePixelRatio || 1);
+      const s = Math.min((w - 2 * pad) / (b[2] - b[0]), (h - 2 * pad) / (b[3] - b[1]));
+      return { s, cx: (b[0] + b[2]) / 2, cy: (b[1] + b[3]) / 2 };
+    }
+    // Follow the player, about 2400 map units across.
+    return { s: w / 2400, cx: player[0], cy: player[1] };
+  }
+
+  let queued = false;
+  function redraw() {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => { queued = false; paint(); });
+  }
+
+  function paint() {
+    const w = map.width, h = map.height;
+    mctx.clearRect(0, 0, w, h);
+    if (!level) return;
+    const v = view();
+    const X = (x) => w / 2 + (x - v.cx) * v.s, Y = (y) => h / 2 - (y - v.cy) * v.s;
+    const dpr = window.devicePixelRatio || 1;
+    // Faint lines first, important ones on top.
+    for (const pass of [["-", "."], ["#", "%"], ["D", "K", "L", "S", "E"]]) {
+      for (const [x1, y1, x2, y2, k] of level.lines) {
+        if (!pass.includes(k)) continue;
+        const [color, width] = LINE_STYLE[k] || LINE_STYLE["#"];
+        mctx.strokeStyle = color;
+        mctx.lineWidth = width * dpr;
+        mctx.beginPath();
+        mctx.moveTo(X(x1), Y(y1));
+        mctx.lineTo(X(x2), Y(y2));
+        mctx.stroke();
+      }
+    }
+    if (player && route.length) {
+      mctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--route");
+      mctx.lineWidth = 2 * dpr;
+      mctx.setLineDash([5 * dpr, 4 * dpr]);
+      mctx.beginPath();
+      mctx.moveTo(X(player[0]), Y(player[1]));
+      for (const [x, y] of route) mctx.lineTo(X(x), Y(y));
+      mctx.stroke();
+      mctx.setLineDash([]);
+      const [gx, gy] = route[route.length - 1];
+      mctx.fillStyle = "#f2c14e";
+      mctx.beginPath();
+      mctx.arc(X(gx), Y(gy), 4.5 * dpr, 0, Math.PI * 2);
+      mctx.fill();
+    }
+    if (player) {
+      const [px, py, a] = player;
+      const r = (a * Math.PI) / 180, s = 7 * dpr;
+      const tip = [X(px) + Math.cos(r) * s * 1.4, Y(py) - Math.sin(r) * s * 1.4];
+      const l = [X(px) + Math.cos(r + 2.5) * s, Y(py) - Math.sin(r + 2.5) * s];
+      const rr = [X(px) + Math.cos(r - 2.5) * s, Y(py) - Math.sin(r - 2.5) * s];
+      mctx.fillStyle = "#4caf50";
+      mctx.strokeStyle = "#0a0a0c";
+      mctx.lineWidth = 1.5 * dpr;
+      mctx.beginPath();
+      mctx.moveTo(...tip); mctx.lineTo(...l); mctx.lineTo(...rr); mctx.closePath();
+      mctx.fill(); mctx.stroke();
+    }
+  }
+
+  function setLevel(data) {
+    const xs = data.lines.flatMap((l) => [l[0], l[2]]), ys = data.lines.flatMap((l) => [l[1], l[3]]);
+    level = { lines: data.lines, bounds: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)] };
+    $("level-name").textContent = "· " + data.name;
+    redraw();
+  }
+
+  function setStatus(st) {
+    const goal = $("goal");
+    if (!st.in_level) { route = []; goal.textContent = ""; redraw(); return; }
+    route = st.route || [];
+    player = st.player;
+    goal.replaceChildren();
+    if (st.goal) {
+      goal.append("Heading to ");
+      const b = document.createElement("b");
+      b.textContent = st.goal;
+      goal.append(b);
+      if (st.route_length != null) goal.append(` · ${st.route_length} units`);
+      if (st.note) goal.append(" — " + st.note);
+    }
+    redraw();
+  }
+
+  $("zoom").onclick = () => {
+    wholeLevel = !wholeLevel;
+    $("zoom").textContent = wholeLevel ? "Follow player" : "Whole level";
+    redraw();
+  };
+  new ResizeObserver(fit).observe(map);
+
+  // ---- Event stream ----
+  const es = new EventSource("/events");
+  // The server replays recent history on every (re)connect.
+  es.onopen = () => { log.replaceChildren(); $("dot").classList.add("live"); $("conn").textContent = "live"; };
+  es.onerror = () => { $("dot").classList.remove("live"); $("conn").textContent = "reconnecting…"; };
+  es.addEventListener("frame", (e) => draw("data:image/png;base64," + e.data));
+  es.addEventListener("pos", (e) => { player = JSON.parse(e.data); redraw(); });
+  es.addEventListener("log", (e) => addLog(JSON.parse(e.data)));
+  es.addEventListener("level", (e) => setLevel(JSON.parse(e.data)));
+  es.addEventListener("status", (e) => setStatus(JSON.parse(e.data)));
+  es.addEventListener("plan", (e) => { $("plan").textContent = JSON.parse(e.data); });
+</script>
+</body>
+</html>

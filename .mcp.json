@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "doom": {
+      "command": "./target/release/doom-mcp",
+      "args": ["--wad", "doom1.wad"]
+    }
+  }
+}
