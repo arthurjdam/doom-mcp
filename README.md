@@ -53,6 +53,17 @@ browser automatically the first time the model calls `new_game`. It shows:
 - an action log showing what the model did, with the outcome (health, ammo, kills, damage);
 - the model's own narration, if it passes `act`'s optional `comment`.
 
+**Telling Claude what to do.** Type into the box under the video ("take the left door",
+"shoot all the barrels"). The message is queued and placed at the top of Claude's next tool
+result, marked `📣 MESSAGE FROM THE HUMAN WATCHING`. Claude is instructed to treat it as an
+instruction from you that overrides its default goal, acknowledge it, and update its plan.
+The log shows your message, then a ✓ once Claude has received it.
+
+Because this text steers the agent, the endpoint (`POST /command`) is locked down. It needs a
+random per-run token that is only in the link the server opens for you (`/?token=…`); requests
+from any other origin or `Host` are refused, and so are non-JSON bodies. Messages are limited to
+one line of 500 characters, with at most 20 waiting. The page itself only listens on 127.0.0.1.
+
 The game only advances while the model is acting, so the video plays each action back in real
 time and holds on the last frame while the model is thinking. Flags: `--viewer-port PORT`,
 `--no-open` (serve the page but don't open a browser), `--no-viewer`. If port 6660 is taken,
