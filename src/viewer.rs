@@ -4,7 +4,9 @@
 //! The game itself runs in bursts (an `act` of 30 tics finishes in a few
 //! milliseconds), so frames are queued and re-paced to 35 fps here. Log lines,
 //! the plan and the minimap data go through the same queue so they stay in
-//! sync with the video.
+//! sync with the video. While someone is watching, calls that advance the game
+//! first wait for the previous action to finish playing (`wait_for_playback`),
+//! so playback never falls behind and no frame is ever dropped.
 //!
 //! The page can also send short messages to the model (POST /command). They
 //! are queued here and attached to the model's next tool result. Because that
@@ -14,8 +16,9 @@
 
 use std::collections::VecDeque;
 use std::io::Cursor;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use base64::Engine as _;
@@ -30,8 +33,15 @@ use crate::map;
 use crate::session::{NavSummary, Session};
 
 const PAGE: &str = include_str!("viewer.html");
-/// Drop the oldest frames once playback falls this far behind (frames).
-const MAX_BACKLOG: usize = TICRATE as usize * 6;
+/// Memory guard only: with nobody watching (so nothing waits for playback),
+/// frames beyond this backlog are dropped, oldest first. With a viewer
+/// connected, `wait_for_playback` keeps the backlog to about one action.
+const MAX_BACKLOG: usize = TICRATE as usize * 60;
+/// Let the next action start this close to the end of the previous one's
+/// playback, so consecutive actions play back to back without a gap.
+const SYNC_SLACK: usize = TICRATE as usize / 4;
+/// Never hold a tool call longer than this waiting for playback.
+const MAX_SYNC_WAIT: Duration = Duration::from_secs(15);
 const LOG_HISTORY: usize = 100;
 /// Longest message the spectator may send, in characters.
 pub const MAX_MESSAGE_CHARS: usize = 500;
@@ -67,6 +77,8 @@ struct LogLine<'a> {
 enum Item {
     /// A frame plus the player's (x, y, angle) when it was drawn, if in a level.
     Frame(Vec<u32>, Option<[f64; 3]>),
+    /// The same frame, encoded as its SSE event(s) by the encoder thread.
+    Encoded(Arc<str>),
     Log(Arc<str>),
     /// Latest-value-wins state (level geometry, route, plan) replayed to new viewers.
     Sticky(&'static str, Arc<str>),
@@ -134,7 +146,27 @@ pub fn publish_status(session: &mut Session, nav: Option<&NavSummary>) {
     sticky("status", json.to_string());
 }
 
-static SINK: OnceLock<mpsc::UnboundedSender<Item>> = OnceLock::new();
+/// Everything for the page goes through here, in order: the encoder thread
+/// turns frames into PNG events and forwards all items to the pacer.
+static SINK: OnceLock<std::sync::mpsc::Sender<Item>> = OnceLock::new();
+
+/// Frames drawn by the engine but not yet shown on the page.
+static FRAMES_PENDING: AtomicUsize = AtomicUsize::new(0);
+/// Open spectator streams.
+static VIEWERS: AtomicUsize = AtomicUsize::new(0);
+
+/// Wait (up to MAX_SYNC_WAIT) until the page has nearly caught up with the
+/// game, so the next action's frames follow straight on from the previous
+/// ones. Returns immediately when nobody is watching.
+pub async fn wait_for_playback() {
+    let deadline = Instant::now() + MAX_SYNC_WAIT;
+    while VIEWERS.load(Ordering::SeqCst) > 0
+        && FRAMES_PENDING.load(Ordering::SeqCst) > SYNC_SLACK
+        && Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
 
 /// Spectator messages waiting for the model's next tool result.
 static INBOX: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
@@ -170,7 +202,10 @@ extern "C" fn on_frame(fb: *const u32) {
         let mut st = ffi::State::default();
         unsafe { ffi::dmcp_state(&mut st) };
         let pos = (st.in_level != 0).then_some([st.x, st.y, st.angle]);
-        let _ = sink.send(Item::Frame(frame, pos));
+        FRAMES_PENDING.fetch_add(1, Ordering::SeqCst);
+        if sink.send(Item::Frame(frame, pos)).is_err() {
+            FRAMES_PENDING.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -221,8 +256,30 @@ pub async fn start(port: u16) -> Result<String> {
     let token = random_token()?;
     let url = format!("http://127.0.0.1:{port}/?token={token}");
 
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, encoder_rx) = std::sync::mpsc::channel::<Item>();
+    let (pace_tx, rx) = mpsc::unbounded_channel();
     let _ = SINK.set(tx);
+    std::thread::Builder::new()
+        .name("viewer-encoder".into())
+        .spawn(move || {
+            // PNG-encode frames as they arrive (about 40% of their raw size),
+            // passing every item on in its original order.
+            for item in encoder_rx {
+                let item = match item {
+                    Item::Frame(frame, pos) => {
+                        let mut event = frame_event(&frame);
+                        if let Some([x, y, a]) = pos {
+                            event.push_str(&format!("event: pos\ndata: [{x:.0},{y:.0},{a:.1}]\n\n"));
+                        }
+                        Item::Encoded(event.into())
+                    }
+                    other => other,
+                };
+                if pace_tx.send(item).is_err() {
+                    break;
+                }
+            }
+        })?;
     unsafe { ffi::dmcp_set_frame_callback(on_frame) };
 
     let shared = Arc::new(Shared {
@@ -271,15 +328,17 @@ async fn pace(mut rx: mpsc::UnboundedReceiver<Item>, shared: Arc<Shared>) {
         tokio::select! {
             item = rx.recv() => {
                 let Some(item) = item else { return };
-                if matches!(item, Item::Frame(..)) {
+                if matches!(item, Item::Encoded(_)) {
                     frames_queued += 1;
                 }
                 queue.push_back(item);
-                // Too far behind: skip ahead, keeping the log lines.
+                // Memory guard (only reachable with nobody watching): drop the
+                // oldest frames, keeping the log lines.
                 while frames_queued > MAX_BACKLOG {
-                    let i = queue.iter().position(|it| matches!(it, Item::Frame(..))).unwrap();
+                    let i = queue.iter().position(|it| matches!(it, Item::Encoded(_))).unwrap();
                     queue.remove(i);
                     frames_queued -= 1;
+                    FRAMES_PENDING.fetch_sub(1, Ordering::SeqCst);
                 }
             }
             _ = tick.tick(), if !queue.is_empty() => {
@@ -288,17 +347,14 @@ async fn pace(mut rx: mpsc::UnboundedReceiver<Item>, shared: Arc<Shared>) {
                     match item {
                         Item::Log(event) => shared.log_now(event),
                         Item::Sticky(name, event) => shared.set_sticky(name, event),
-                        Item::Frame(frame, pos) => {
+                        Item::Encoded(event) => {
                             frames_queued -= 1;
-                            let mut event = frame_event(&frame);
-                            if let Some([x, y, a]) = pos {
-                                event.push_str(&format!(
-                                    "event: pos\ndata: [{x:.0},{y:.0},{a:.1}]\n\n"
-                                ));
-                            }
-                            shared.set_sticky("frame", event.into());
+                            shared.set_sticky("frame", event);
+                            FRAMES_PENDING.fetch_sub(1, Ordering::SeqCst);
                             break;
                         }
+                        // The encoder thread converts every frame before it gets here.
+                        Item::Frame(..) => unreachable!("frames are encoded before pacing"),
                     }
                 }
             }
@@ -431,14 +487,36 @@ async fn respond_json(stream: &mut TcpStream, status: &str, json: serde_json::Va
     respond(stream, status, "application/json", json.to_string().as_bytes()).await
 }
 
+/// Close after replying early to a request whose body we didn't read: stop
+/// sending, then drain (bounded) what the client is still uploading.
+/// Closing with unread data makes the OS send a reset, and the client would
+/// lose our reply.
+async fn linger(mut stream: TcpStream) -> std::io::Result<()> {
+    stream.shutdown().await?;
+    let mut sink = [0u8; 8192];
+    let mut drained = 0;
+    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+        while drained < 1024 * 1024 {
+            match stream.read(&mut sink).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => drained += n,
+            }
+        }
+    })
+    .await;
+    Ok(())
+}
+
 async fn handle(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<()> {
     let request = match tokio::time::timeout(REQUEST_TIMEOUT, read_request(&mut stream)).await {
         Ok(Ok(r)) => r,
         Ok(Err(ReadError::TooLarge)) => {
-            return respond_json(&mut stream, "413 Payload Too Large", serde_json::json!({"error": "request too large"})).await;
+            respond_json(&mut stream, "413 Payload Too Large", serde_json::json!({"error": "request too large"})).await?;
+            return linger(stream).await;
         }
         Ok(Err(ReadError::BadRequest)) => {
-            return respond_json(&mut stream, "400 Bad Request", serde_json::json!({"error": "malformed request"})).await;
+            respond_json(&mut stream, "400 Bad Request", serde_json::json!({"error": "malformed request"})).await?;
+            return linger(stream).await;
         }
         Ok(Err(ReadError::Io)) | Err(_) => return Ok(()),
     };
@@ -510,7 +588,24 @@ fn accept_command(request: &Request, shared: &Shared) -> (&'static str, serde_js
     ("200 OK", json!({ "ok": true, "pending": pending }))
 }
 
+/// Counts an open spectator stream for as long as it lives.
+struct ViewerGuard;
+
+impl ViewerGuard {
+    fn new() -> Self {
+        VIEWERS.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for ViewerGuard {
+    fn drop(&mut self) {
+        VIEWERS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 async fn stream_events(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<()> {
+    let _viewer = ViewerGuard::new();
     let mut rx = shared.events.subscribe();
     stream
         .write_all(

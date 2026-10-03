@@ -42,8 +42,9 @@ nearest unused switch, `explore` for unseen areas, a thing (e.g. a medikit by id
 
 COMBAT
 Each observation lists nearby things with id, distance and bearing (degrees from your \
-crosshair: + right, - left). To shoot: act aim_at=<id> fire=true tics=15-30 (aim_at turns you \
-exactly onto it; Doom aims up/down for you). Prefer the best weapon you have ammo for (shotgun \
+crosshair: + right, - left). To shoot: act aim_at=<id> fire=true tics=15-30 (aim_at turns \
+toward it and keeps tracking it; firing starts once it's in the crosshair, and turning time \
+doesn't use up `tics`; Doom aims up/down for you). Prefer the best weapon you have ammo for (shotgun \
 3 > pistol 2; chaingun 4 for crowds). Strafe sideways between volleys to dodge fireballs. Pick \
 up health (route goal thing) when below ~50. Kill monsters marked TARGETING YOU first.
 
@@ -56,7 +57,8 @@ and say why. Acknowledge each in your next act `comment`, and update your plan w
 when it changes what you're doing.
 
 MANUAL CONTROL
-act also takes move/strafe/turn for fine control. turn is relative, positive = right. Facing \
+act also takes move/strafe/turn for fine control. turn is relative, positive = right, and \
+the view turns smoothly at up to 12 degrees per tic (180 takes ~15 tics). Facing \
 angles use map convention (0 = east, 90 = north). Running covers ~430 units per 35 tics. \
 `get_map` draws an ASCII map (north_up=true is easiest to read) with your route dotted in. \
 `press_keys` is for menus only.";
@@ -97,11 +99,14 @@ pub struct ActParams {
     #[serde(default)]
     pub follow_route: bool,
     /// Degrees to turn: positive turns right (clockwise), negative turns left.
-    /// Applied at the start of the action, up to 90 degrees per tic.
+    /// The view turns smoothly at up to 12 degrees per tic (180 takes ~15 tics),
+    /// from the start of the action; with fire, the turn finishes before firing.
     #[serde(default)]
     pub turn: Option<f64>,
-    /// Id of a thing (from the `things` list) to turn and face exactly.
-    /// Added on top of `turn`.
+    /// Id of a thing (from the `things` list) to aim at. The view turns toward it
+    /// and keeps tracking it every tic for the whole action (replacing `turn`).
+    /// With fire, shooting starts once the crosshair is on it, and the turning
+    /// time doesn't count toward `tics`.
     #[serde(default)]
     pub aim_at: Option<u32>,
     /// Hold the fire button.
@@ -603,6 +608,7 @@ impl DoomServer {
         &self,
         Parameters(p): Parameters<NewGameParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        viewer::wait_for_playback().await;
         let mut result = self
             .run(move |engine| {
                 let commercial = engine.state().gamemode == 2;
@@ -660,18 +666,24 @@ impl DoomServer {
         if p.weapon.is_some_and(|w| !(1..=7).contains(&w)) {
             return Ok(tool_error("weapon must be a slot from 1 to 7"));
         }
+        viewer::wait_for_playback().await;
         self.run(move |engine| {
             if p.follow_route {
                 return follow_route(engine, &p);
             }
             let mut turn = p.turn.unwrap_or(0.0);
+            // aim_at: the engine pointer and type of the target, to track it every tic.
+            let mut aim_target = None;
             if let Some(id) = p.aim_at {
                 let target = engine
                     .things(8192.0)
                     .into_iter()
                     .find(|t| engine.thing_id(t.id) == id);
                 match target {
-                    Some(t) => turn += t.bearing,
+                    Some(t) => {
+                        turn = t.bearing;
+                        aim_target = Some((t.id, t.type_));
+                    }
                     None => {
                         return Ok(tool_error(format!(
                             "no thing with id {id} (it may be dead, picked up, or the level changed)"
@@ -704,7 +716,17 @@ impl DoomServer {
             viewer::log(LogKind::Action, &describe_action(&p, turn));
 
             let before = engine.state();
-            engine.step(&input)?;
+            match aim_target {
+                // Keep the crosshair on the target for the whole action; stop
+                // turning once it's gone (dead monsters stay put anyway).
+                Some((ptr, kind)) => engine.step_aimed(&Input { turn_degrees: 0.0, ..input.clone() }, |e| {
+                    e.things(8192.0)
+                        .into_iter()
+                        .find(|t| t.id == ptr && t.type_ == kind && t.health > 0)
+                        .map(|t| t.bearing)
+                })?,
+                None => engine.step(&input)?,
+            }
             let after = engine.state();
             let mut events = Vec::new();
             observe::diff_events(&before, &after, &mut events);
@@ -864,6 +886,7 @@ impl DoomServer {
             return Ok(tool_error("keys must contain 1-64 entries"));
         }
         let gap = p.gap_tics.clamp(1, TICRATE * 2);
+        viewer::wait_for_playback().await;
         self.run(move |engine| {
             let mut codes = Vec::new();
             for name in &p.keys {

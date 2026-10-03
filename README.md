@@ -65,7 +65,15 @@ from any other origin or `Host` are refused, and so are non-JSON bodies. Message
 one line of 500 characters, with at most 20 waiting. The page itself only listens on 127.0.0.1.
 
 The game only advances while the model is acting, so the video plays each action back in real
-time and holds on the last frame while the model is thinking. Flags: `--viewer-port PORT`,
+time (every frame, at 35 fps) and holds on the last frame while the model is thinking. One game
+action can cover up to 10 seconds of game time, which can take longer to play than the model
+takes to think. So while a viewer is connected, `act`, `new_game` and `press_keys` first wait
+for the previous action to finish playing (at most 15 s). The video never falls behind or skips
+frames, and pauses only when the model thinks longer than the last action took to play.
+The engine runs in Doom's `singletics` mode, so every frame is exactly one game tic (no
+catch-up after screen melts), and the view turns at most 12° per frame, so nothing cuts
+except real teleports and respawns. With
+nobody watching, nothing waits. Flags: `--viewer-port PORT`,
 `--no-open` (serve the page but don't open a browser), `--no-viewer`. If port 6660 is taken,
 a free port is used; the URL is printed to stderr and included in the `new_game` result.
 
@@ -74,7 +82,7 @@ a free port is used; the URL is printed to stderr and included in the `new_game`
 | Tool | Game time passes? | What it does |
 |---|---|---|
 | `new_game` | yes (1s load) | Start at a skill/episode/map, skipping the menus. Returns the level briefing. |
-| `act` | yes, `tics` | Hold movement/strafe/fire/use/run/weapon controls for N tics (35/s), with an exact relative `turn` or `aim_at` a thing. With `follow_route: true` the server walks the planned route instead (below). |
+| `act` | yes, `tics` | Hold movement/strafe/fire/use/run/weapon controls for N tics (35/s), with an exact relative `turn`, or `aim_at` a thing (tracks it every tic; firing starts once it's in the crosshair). Turning is smooth, at up to 12° per tic. With `follow_route: true` the server walks the planned route instead (below). |
 | `route` | no | Pick a navigation goal: `exit`, `secret_exit`, a key colour, `switch`, `explore`, a `thing` id, or a `point`. Returns the full route. |
 | `set_plan` | no | Claude writes or replaces its plan for the level. The plan is echoed in every observation and shown to spectators. |
 | `observe` | no | Current observation. |

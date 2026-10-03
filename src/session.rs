@@ -236,9 +236,9 @@ impl Session {
             .collect()
     }
 
-    /// Turn in place to face (x, y), spending up to two tics.
+    /// Turn in place to face (x, y), at the engine's smooth turn rate.
     fn face(&mut self, x: f64, y: f64) -> Result<()> {
-        for _ in 0..2 {
+        for _ in 0..20 {
             let s = self.engine.state();
             let b = nav::bearing_to(&s, x, y);
             if b.abs() < 1.0 {
@@ -280,6 +280,8 @@ impl Session {
             ..Default::default()
         };
         let mut held = self.engine.press(&walk)?;
+        let forward = self.engine.key_bindings().up;
+        let mut walking = true;
 
         let mut idx = 0;
         let mut used = 0;
@@ -344,6 +346,7 @@ impl Session {
                     }
                     events.push("Opened a door".into());
                     held = self.engine.press(&walk)?;
+                    walking = true;
                     checkpoint = (s.x, s.y, used);
                     idx += 1;
                     continue;
@@ -371,8 +374,15 @@ impl Session {
                 _ => {}
             }
 
+            // Steer smoothly; on sharp corners turn in place rather than
+            // arcing into a wall.
             let bearing = nav::bearing_to(&s, wp.x, wp.y);
-            self.engine.turn_next_tic(bearing.clamp(-45.0, 45.0));
+            let go = bearing.abs() <= 60.0;
+            if go != walking {
+                self.engine.set_key(forward, go);
+                walking = go;
+            }
+            self.engine.turn_next_tic(bearing);
             self.engine.run_tic()?;
             used += 1;
 
@@ -442,6 +452,7 @@ impl Session {
                             used += input.tics;
                         }
                         held = self.engine.press(&walk)?;
+                        walking = true;
                         let now = self.engine.state();
                         checkpoint = (now.x, now.y, used);
                         continue;

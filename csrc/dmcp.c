@@ -14,9 +14,11 @@
 
 #include "doomgeneric.h"
 #include "d_event.h"
+#include "d_loop.h"
 #include "d_player.h"
 #include "doomstat.h"
 #include "g_game.h"
+#include "i_timer.h"
 #include "m_controls.h"
 #include "p_local.h"
 #include "r_main.h"
@@ -82,6 +84,11 @@ int dmcp_create(int argc, char **argv)
     doomgeneric_Create(argc, argv);
     active_jmp = NULL;
 
+    // One game tic per engine iteration, never several at once. Without this,
+    // tics that pass during a screen melt are caught up in one go afterwards,
+    // which shows as a jump in the spectator video.
+    singletics = true;
+
     // Messages are captured by dmcp_take_message() rather than shown on the
     // HUD, and mouse events map 1:1 onto turn units (see dmcp_turn).
     showMessages = 0;
@@ -96,7 +103,7 @@ static char last_message[128];
 int dmcp_run_tic(void)
 {
     jmp_buf jb;
-    int start, i;
+    int start, i, now;
 
     if (exited)
         return -1;
@@ -107,6 +114,16 @@ int dmcp_run_tic(void)
     }
     active_jmp = &jb;
     start = gametic;
+
+    // Move the virtual clock to the start of the next tic first, so the Tick
+    // below runs exactly one game tic and draws exactly one frame. Otherwise
+    // TryRunTics only notices the new tic part-way through a Tick, returns
+    // without running it, and D_Display redraws the unchanged screen: two
+    // frames per tic, which doubles the spectator video's length.
+    now = I_GetTime();
+    while (I_GetTime() == now)
+        clock_ms++;
+
     for (i = 0; i < 16 && gametic == start; i++)
         doomgeneric_Tick();
     active_jmp = NULL;

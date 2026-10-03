@@ -10,8 +10,18 @@ use super::ffi::{self, Keys, Line, SCREEN_H, SCREEN_W, Sector, State, Thing};
 
 /// One full turn in "mouse units" (see `dmcp_turn`): 65536 angleturn / 8.
 const UNITS_PER_TURN: f64 = 8192.0;
-/// Cap per tic so the engine's 16-bit angleturn never overflows.
-const MAX_UNITS_PER_TIC: i32 = 2048;
+/// Fastest the view turns, in degrees per tic: 180 degrees takes under half
+/// a second. Faster turns look like jump cuts on the spectator video.
+const MAX_TURN_PER_TIC: f64 = 12.0;
+const MAX_UNITS_PER_TIC: i32 = (MAX_TURN_PER_TIC * UNITS_PER_TURN / 360.0) as i32;
+/// When firing, the trigger is pulled once the remaining turn is this small.
+const FIRE_TOLERANCE: f64 = 4.0;
+/// Most tics spent turning toward a target before firing anyway.
+const MAX_AIM_TICS: u32 = 35;
+
+fn to_units(degrees: f64) -> i32 {
+    (degrees * UNITS_PER_TURN / 360.0).round() as i32
+}
 
 pub const TICRATE: u32 = 35;
 
@@ -112,34 +122,65 @@ impl Engine {
         Ok(())
     }
 
-    /// Hold the requested controls for `input.tics` tics.
+    /// Hold the requested controls for `input.tics` tics, turning smoothly by
+    /// `input.turn_degrees` from the start (taking extra tics if the turn is
+    /// longer than the action). When firing, the turn comes first.
     pub fn step(&mut self, input: &Input) -> Result<()> {
-        let held = self.press(input)?;
-        if let Some(slot) = input.weapon {
-            unsafe { ffi::dmcp_key(1, (b'0' + slot) as c_int) };
+        self.step_aimed(input, |_| None)
+    }
+
+    /// Like `step`, but every tic `aim` may return a bearing (degrees,
+    /// positive = right) to turn toward instead, e.g. to track a moving
+    /// target. Fire is only pressed once the view is (nearly) on target, and
+    /// the tics spent turning before that don't count toward `input.tics`.
+    pub fn step_aimed(
+        &mut self,
+        input: &Input,
+        mut aim: impl FnMut(&mut Engine) -> Option<f64>,
+    ) -> Result<()> {
+        let fire_key = self.keys.fire;
+        let mut held = self.press(&Input { fire: false, ..input.clone() })?;
+        let weapon_key = input.weapon.map(|slot| (b'0' + slot) as c_int);
+        if let Some(key) = weapon_key {
+            unsafe { ffi::dmcp_key(1, key) };
         }
 
-        let mut turn_left = (input.turn_degrees * UNITS_PER_TURN / 360.0).round() as i32;
         let tics = input.tics.max(1);
-        for i in 0..tics {
-            if turn_left != 0 {
-                let units = turn_left.clamp(-MAX_UNITS_PER_TIC, MAX_UNITS_PER_TIC);
-                unsafe { ffi::dmcp_turn(units) };
-                turn_left -= units;
+        let mut manual_left = to_units(input.turn_degrees);
+        let mut firing = false;
+        let (mut counted, mut aiming_tics) = (0, 0);
+        loop {
+            let target = aim(self);
+            let wanted = target.map(to_units).unwrap_or(manual_left);
+            let turn = wanted.clamp(-MAX_UNITS_PER_TIC, MAX_UNITS_PER_TIC);
+            if input.fire && !firing {
+                let left_after = f64::from((wanted - turn).abs()) * 360.0 / UNITS_PER_TURN;
+                if left_after <= FIRE_TOLERANCE || aiming_tics >= MAX_AIM_TICS {
+                    unsafe { ffi::dmcp_key(1, fire_key) };
+                    held.push(fire_key);
+                    firing = true;
+                }
+            }
+            if turn != 0 {
+                unsafe { ffi::dmcp_turn(turn) };
+            }
+            if target.is_none() {
+                manual_left -= turn;
             }
             self.run_tic()?;
-            if i == 0
-                && let Some(slot) = input.weapon
+            if counted + aiming_tics == 0
+                && let Some(key) = weapon_key
             {
-                unsafe { ffi::dmcp_key(0, (b'0' + slot) as c_int) };
+                unsafe { ffi::dmcp_key(0, key) };
             }
-        }
-        // Finish any turn longer than the step allowed for.
-        while turn_left != 0 {
-            let units = turn_left.clamp(-MAX_UNITS_PER_TIC, MAX_UNITS_PER_TIC);
-            unsafe { ffi::dmcp_turn(units) };
-            turn_left -= units;
-            self.run_tic()?;
+            if input.fire && !firing {
+                aiming_tics += 1;
+            } else {
+                counted += 1;
+            }
+            if counted >= tics && (target.is_some() || manual_left == 0) {
+                break;
+            }
         }
         self.release(held);
         Ok(())
@@ -190,13 +231,18 @@ impl Engine {
         self.last_held = held;
     }
 
-    /// Turn by `degrees` (positive = right) during the next tic. At most 90.
+    /// Turn toward `degrees` (positive = right) during the next tic, by at
+    /// most MAX_TURN_PER_TIC.
     pub fn turn_next_tic(&mut self, degrees: f64) {
-        let units = (degrees * UNITS_PER_TURN / 360.0).round() as i32;
-        let units = units.clamp(-MAX_UNITS_PER_TIC, MAX_UNITS_PER_TIC);
+        let units = to_units(degrees).clamp(-MAX_UNITS_PER_TIC, MAX_UNITS_PER_TIC);
         if units != 0 {
             unsafe { ffi::dmcp_turn(units) };
         }
+    }
+
+    /// Press or release a single key (by its engine key code).
+    pub fn set_key(&mut self, key: c_int, down: bool) {
+        unsafe { ffi::dmcp_key(c_int::from(down), key) };
     }
 
     /// Tap "use" for one tic.
