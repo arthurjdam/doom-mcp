@@ -3,9 +3,15 @@
 An [MCP](https://modelcontextprotocol.io) server that lets an LLM play the original DOOM (1993).
 
 It embeds the real id Software engine (via [doomgeneric](https://github.com/ozkl/doomgeneric))
-into a Rust binary and exposes it as MCP tools over stdio. The game runs on a **virtual clock**,
-so it is frozen between tool calls: the model can think as long as it wants, and every action is
-deterministic.
+into a Rust binary and exposes it as MCP tools over stdio. There are two ways to play:
+
+- **Turn-based** (`--mode turn`, the default): the game is frozen between tool calls. The model
+  controls every action and can think as long as it wants, and every action is deterministic.
+- **Real-time** (`--mode realtime`): the game runs continuously. A built-in **pilot** plays
+  moment to moment (moving, fighting, opening doors) while the model acts as **commander**,
+  giving standing orders and reacting to events.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for how the pieces fit together.
 
 ## Quick start
 
@@ -38,6 +44,8 @@ Then ask: *"Start a new game of Doom and try to finish E1M1."*
   }
 }
 ```
+
+For real-time mode, add `"--mode", "realtime"` to `args` (or to the `claude mcp add` command).
 
 WAD lookup order: `--wad`, then `$DOOM_WAD`, then `doom1.wad`/`doom.wad`/`doom2.wad` in the
 current directory or next to the binary. Extra engine flags go after `--`, e.g. `-- -fast`.
@@ -77,7 +85,31 @@ nobody watching, nothing waits. Flags: `--viewer-port PORT`,
 `--no-open` (serve the page but don't open a browser), `--no-viewer`. If port 6660 is taken,
 a free port is used; the URL is printed to stderr and included in the `new_game` result.
 
-## Tools
+## Real-time mode
+
+The game runs at 35 tics per second. Each tic, the pilot (`src/pilot`) decides:
+
+- **Fight** if a monster is in sight and the stance allows it: pick a target (the commander's
+  focus first, then whatever is attacking), choose the best weapon for the range (never the BFG
+  unless ordered, no rockets up close), track it, fire when it's in the crosshair, strafe, and
+  back off from melee monsters.
+- **Travel** otherwise: follow the route to the navigation goal, open doors, ride lifts, press
+  the switches and pick up the keys the route leads to, and work itself free when stuck.
+- **Respawn** 3 s after dying, and move on through intermission screens.
+
+The model commands with these tools:
+
+| Tool | What it does |
+|---|---|
+| `new_game` | Start a game; the result has the level briefing. |
+| `command` | Standing orders: navigation `goal` (same goals as `route`), `stance` (`aggressive`, `balanced`, `cautious`, `hold_fire`), `focus` a target, `travel: false` to hold position, a preferred `weapon`, or `use` now. Only the fields given change. |
+| `wait_for_events` | Waits up to `timeout_seconds` and returns early on anything important (level start or end, low health, death, stuck, a big monster, a spectator message). Returns every event since the last call plus a status summary. |
+| `observe`, `set_plan`, `get_map`, `press_keys` | As in turn-based mode. |
+
+If the model makes no tool calls for 60 s, the game pauses until the next call. Playing E1M1 on
+its own, the pilot clears the level, all 6 monsters included, in about 26 s of game time.
+
+## Tools (turn-based mode)
 
 | Tool | Game time passes? | What it does |
 |---|---|---|
@@ -141,7 +173,10 @@ Every observation contains:
   C API for stepping one tic, injecting events, and reading player state, map objects (with
   `P_CheckSight` line-of-sight checks) and linedefs.
 - **Virtual time**: `DG_GetTicksMs` returns a counter that only advances when the engine sleeps.
-  The engine "waits" for its next tic, time jumps forward, and a stepping loop runs exactly N tics.
+  The shim moves it to the next tic boundary and runs exactly one tic per step (in Doom's
+  `singletics` mode), so every frame is exactly one game tic. In real-time mode the game thread
+  runs those steps 35 times a second; with the spectator page open, the video's playback clock
+  sets the pace, so the two never drift apart.
 - **Input**: key events are posted straight into Doom's event queue using its own key bindings.
   Turning uses mouse events, which map linearly onto the engine's turn units, so `turn: 37.5`
   turns exactly 37.5° (±0.05°).
@@ -150,9 +185,9 @@ Every observation contains:
   tool error.
 - **stdout**: Doom `printf`s a lot. At startup, fd 1 is pointed at stderr and MCP gets a
   `dup` of the original stdout, so engine output can't corrupt the JSON-RPC stream.
-- **Spectator view** (`src/viewer.rs`): the shim calls back into Rust on every frame. Frames
-  are queued, re-paced to 35 fps, PNG-encoded and pushed to the browser over Server-Sent Events
-  from a tiny HTTP server bound to 127.0.0.1.
+- **Spectator view** (`src/viewer`): the shim calls back into Rust on every frame. Frames are
+  PNG-encoded on their own thread, re-paced to 35 fps behind a 3-frame (86 ms) jitter buffer, and
+  pushed to the browser over Server-Sent Events from a tiny HTTP server bound to 127.0.0.1.
 - **MCP**: [`rmcp`](https://crates.io/crates/rmcp) 3.5 implements protocol revision
   `2026-07-28` (stateless, `server/discover`) and still accepts older clients that use the
   `initialize` handshake.
@@ -162,6 +197,9 @@ Every observation contains:
 - One game per process: doomgeneric uses global state. If the game is quit from the menu,
   restart the server.
 - No sound.
+- The real-time pilot's combat is rule-based: it's competent against episode 1's monsters, but it
+  doesn't manage health or ammo strategically. That's the commander's job, for example sending
+  it to a medikit with `command` and `goal: thing`.
 - The planner is heuristic. Lifts are approached and then handed back to the model; boss
   levels open their exit when the bosses die, which it can't predict; and a few kinds of
   trigger aren't modelled. When there's no known route it says so and suggests the `switch` or

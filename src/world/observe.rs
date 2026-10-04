@@ -7,17 +7,17 @@ use std::io::Cursor;
 use rmcp::schemars::{self, JsonSchema};
 use serde::Serialize;
 
-use crate::doom::Engine;
-use crate::doom::engine::TICRATE;
-use crate::doom::ffi::{MF_COUNTKILL, MF_SOLID, SCREEN_H, SCREEN_W, State, Thing};
-use crate::doom::things::THING_TYPES;
-use crate::session::NavSummary;
+use crate::engine::Engine;
+use crate::engine::TICRATE;
+use crate::engine::ffi::{MF_COUNTKILL, MF_SOLID, SCREEN_H, SCREEN_W, State, Thing};
+use crate::engine::things::THING_TYPES;
+use crate::world::nav::NavSummary;
 
 // Engine enum values (doomdef.h, d_player.h, d_mode.h).
-const GS_LEVEL: i32 = 0;
-const GS_INTERMISSION: i32 = 1;
-const GS_FINALE: i32 = 2;
-const PST_DEAD: i32 = 1;
+pub const GS_LEVEL: i32 = 0;
+pub const GS_INTERMISSION: i32 = 1;
+pub const GS_FINALE: i32 = 2;
+pub const PST_DEAD: i32 = 1;
 const COMMERCIAL: i32 = 2;
 
 pub const WEAPON_NAMES: [&str; 9] = [

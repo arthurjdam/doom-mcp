@@ -2,7 +2,7 @@
   "mcpServers": {
     "doom": {
       "command": "./target/release/doom-mcp",
-      "args": ["--wad", "doom1.wad"]
+      "args": ["--wad", "doom1.wad", "--mode", "realtime"]
     }
   }
 }

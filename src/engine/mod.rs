@@ -1,12 +1,19 @@
-//! Safe-ish wrapper around the engine. An `Engine` must only ever be used
-//! from the thread that created it: doomgeneric is one big pile of globals.
+//! Safe wrapper around the doomgeneric C engine (csrc/dmcp.c): run one tic
+//! at a time, hold keys and turn, read game state, and grab frames. It has no
+//! opinion about how to play; that lives in `world` and `pilot`.
+//!
+//! An `Engine` must only be used from the thread that created it: doomgeneric
+//! is one big pile of globals.
 
 use std::collections::HashMap;
 use std::ffi::{CString, c_char, c_int};
 
 use anyhow::{Result, bail};
 
-use super::ffi::{self, Keys, Line, SCREEN_H, SCREEN_W, Sector, State, Thing};
+pub mod ffi;
+pub mod things;
+
+use ffi::{Keys, Line, SCREEN_H, SCREEN_W, Sector, State, Thing};
 
 /// One full turn in "mouse units" (see `dmcp_turn`): 65536 angleturn / 8.
 const UNITS_PER_TURN: f64 = 8192.0;
@@ -49,10 +56,31 @@ pub struct Input {
     pub tics: u32,
 }
 
+/// What to do during one tic, for controllers that decide tic by tic (the
+/// pilot, route following). See `Engine::tic`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Controls {
+    /// Pos = forward, Neg = backward.
+    pub movement: Dir,
+    /// Pos = right, Neg = left.
+    pub strafe: Dir,
+    /// Degrees to turn this tic (positive = right); capped at MAX_TURN_PER_TIC.
+    pub turn: f64,
+    pub fire: bool,
+    /// Press use. Held on consecutive tics it re-presses every other tic, so
+    /// each request registers (Doom only acts on a fresh press).
+    pub use_: bool,
+    pub run: bool,
+    /// Tap this weapon slot key (1-7).
+    pub weapon: Option<u8>,
+}
+
 pub struct Engine {
     keys: Keys,
     /// Keys held during the previous step; released (queued) at its end.
     last_held: Vec<c_int>,
+    /// Keys currently held by `tic` (released by `release_controls`).
+    tic_held: Vec<c_int>,
     messages: Vec<String>,
     exited: bool,
     /// Small stable ids for map objects, keyed by their engine pointer.
@@ -83,6 +111,7 @@ impl Engine {
         Ok(Self {
             keys,
             last_held: Vec::new(),
+            tic_held: Vec::new(),
             messages: Vec::new(),
             exited: false,
             ids: HashMap::new(),
@@ -139,7 +168,10 @@ impl Engine {
         mut aim: impl FnMut(&mut Engine) -> Option<f64>,
     ) -> Result<()> {
         let fire_key = self.keys.fire;
-        let mut held = self.press(&Input { fire: false, ..input.clone() })?;
+        let mut held = self.press(&Input {
+            fire: false,
+            ..input.clone()
+        })?;
         let weapon_key = input.weapon.map(|slot| (b'0' + slot) as c_int);
         if let Some(key) = weapon_key {
             unsafe { ffi::dmcp_key(1, key) };
@@ -231,6 +263,56 @@ impl Engine {
         self.last_held = held;
     }
 
+    /// Run one tic with `c`: press and release keys so exactly the requested
+    /// ones are held, tap the weapon key, turn, and advance the game.
+    pub fn tic(&mut self, c: &Controls) -> Result<()> {
+        self.check_alive()?;
+        let k = self.keys;
+        let mut want = Vec::with_capacity(6);
+        match c.movement {
+            Dir::Pos => want.push(k.up),
+            Dir::Neg => want.push(k.down),
+            Dir::None => {}
+        }
+        match c.strafe {
+            Dir::Pos => want.push(k.straferight),
+            Dir::Neg => want.push(k.strafeleft),
+            Dir::None => {}
+        }
+        if c.fire {
+            want.push(k.fire);
+        }
+        // A held use key only acts once; release it for a tic between presses.
+        if c.use_ && !self.tic_held.contains(&k.use_) {
+            want.push(k.use_);
+        }
+        if c.run {
+            want.push(k.speed);
+        }
+        if let Some(slot) = c.weapon.filter(|s| (1..=7).contains(s)) {
+            want.push((b'0' + slot) as c_int);
+        }
+        for &key in &self.tic_held {
+            if !want.contains(&key) {
+                unsafe { ffi::dmcp_key(0, key) };
+            }
+        }
+        for &key in &want {
+            if !self.tic_held.contains(&key) {
+                unsafe { ffi::dmcp_key(1, key) };
+            }
+        }
+        self.tic_held = want;
+        self.turn_next_tic(c.turn);
+        self.run_tic()
+    }
+
+    /// Release everything `tic` is holding (e.g. before going back to `step`).
+    pub fn release_controls(&mut self) {
+        let held = std::mem::take(&mut self.tic_held);
+        self.release(held);
+    }
+
     /// Turn toward `degrees` (positive = right) during the next tic, by at
     /// most MAX_TURN_PER_TIC.
     pub fn turn_next_tic(&mut self, degrees: f64) {
@@ -238,24 +320,6 @@ impl Engine {
         if units != 0 {
             unsafe { ffi::dmcp_turn(units) };
         }
-    }
-
-    /// Press or release a single key (by its engine key code).
-    pub fn set_key(&mut self, key: c_int, down: bool) {
-        unsafe { ffi::dmcp_key(c_int::from(down), key) };
-    }
-
-    /// Tap "use" for one tic.
-    pub fn tap_use(&mut self) -> Result<()> {
-        let key = self.keys.use_;
-        if self.last_held.contains(&key) {
-            self.run_tic()?;
-        }
-        unsafe { ffi::dmcp_key(1, key) };
-        self.run_tic()?;
-        unsafe { ffi::dmcp_key(0, key) };
-        self.last_held.clear();
-        Ok(())
     }
 
     /// Tap each key in turn (press, 1 tic, release, `gap` tics).

@@ -1,10 +1,9 @@
-mod doom;
-mod map;
-mod nav;
-mod observe;
-mod server;
-mod session;
+mod engine;
+mod game;
+mod mcp;
+mod pilot;
 mod viewer;
+mod world;
 
 use std::os::fd::FromRawFd;
 use std::path::PathBuf;
@@ -15,7 +14,8 @@ use anyhow::{Context, Result, bail};
 use rmcp::ServiceExt;
 
 const USAGE: &str = "\
-Usage: doom-mcp [--wad PATH] [--viewer-port PORT] [--no-viewer] [--no-open] [-- DOOM_ARGS...]
+Usage: doom-mcp [--mode turn|realtime] [--wad PATH] [--viewer-port PORT] [--no-viewer] [--no-open]
+                [-- DOOM_ARGS...]
 
 Runs DOOM as an MCP server over stdio.
 
@@ -25,6 +25,9 @@ Runs DOOM as an MCP server over stdio.
                       falls back to a free port if taken)
   --no-viewer         Don't serve the spectator page
   --no-open           Don't open the spectator page in a browser on the first new_game
+  --mode MODE         turn (default): the game waits for each action, the model controls
+                      every move. realtime: the game runs continuously, a built-in pilot
+                      plays and the model gives orders.
   -- ARGS             Extra arguments passed straight to the engine (e.g. -- -fast)";
 
 const WAD_NAMES: &[&str] = &[
@@ -87,6 +90,7 @@ async fn main() -> Result<()> {
     let mut viewer_port: u16 = 6660;
     let mut viewer_enabled = true;
     let mut auto_open = true;
+    let mut realtime = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -100,6 +104,13 @@ async fn main() -> Result<()> {
             }
             "--no-viewer" => viewer_enabled = false,
             "--no-open" => auto_open = false,
+            "--mode" => {
+                realtime = match args.next().as_deref() {
+                    Some("turn") => false,
+                    Some("realtime") => true,
+                    _ => bail!("--mode needs turn or realtime\n\n{USAGE}"),
+                }
+            }
             "-h" | "--help" => {
                 eprintln!("{USAGE}");
                 return Ok(());
@@ -126,7 +137,7 @@ async fn main() -> Result<()> {
     let viewer = if viewer_enabled {
         let url = viewer::start(viewer_port).await?;
         eprintln!("doom-mcp: spectator view at {url}");
-        Some(server::ViewerConfig {
+        Some(mcp::common::ViewerConfig {
             url,
             auto_open,
             opened: Arc::new(AtomicBool::new(false)),
@@ -136,12 +147,32 @@ async fn main() -> Result<()> {
     };
 
     eprintln!("doom-mcp: starting DOOM with {}", wad.display());
-    let doom = doom::Doom::spawn(doom_args)?;
+    let game = game::Game::spawn(doom_args, realtime)?;
 
-    let service = server::DoomServer::new(doom, viewer)
-        .serve((tokio::io::stdin(), mcp_out))
-        .await
-        .context("starting MCP service")?;
-    service.waiting().await?;
+    let transport = (tokio::io::stdin(), mcp_out);
+    if realtime {
+        eprintln!("doom-mcp: real-time mode");
+        let core = mcp::common::Core {
+            game,
+            viewer,
+            text: mcp::realtime::TEXT,
+        };
+        let service = mcp::realtime::RealtimeServer::new(core)
+            .serve(transport)
+            .await
+            .context("starting MCP service")?;
+        service.waiting().await?;
+    } else {
+        let core = mcp::common::Core {
+            game,
+            viewer,
+            text: mcp::turn::TEXT,
+        };
+        let service = mcp::turn::TurnServer::new(core)
+            .serve(transport)
+            .await
+            .context("starting MCP service")?;
+        service.waiting().await?;
+    }
     Ok(())
 }

@@ -80,6 +80,10 @@
     padding-top: 8px; margin-top: 4px; }
   #log li.user::before { content: "🧑 You: "; }
   #log li.delivered { color: var(--muted); font-size: 12px; }
+  #log li.event { color: var(--muted); font-size: 12px; }
+  #log li.event::before { content: "· "; }
+  #log li.alert { color: var(--text); font-size: 12.5px; white-space: pre-wrap; }
+  #log li.alert::before { content: "⚠ "; color: var(--comment); }
   #log li.delivered::before { content: "✓ "; color: var(--ok); }
 
   @media (max-width: 900px) {

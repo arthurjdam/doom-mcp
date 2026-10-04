@@ -16,9 +16,9 @@ use std::collections::BinaryHeap;
 
 use serde::Serialize;
 
-use crate::doom::Engine;
-use crate::doom::ffi::{Line, MF_COUNTKILL, MF_SOLID, ML_BLOCKING, ML_MAPPED, Sector, State};
-use crate::observe::thing_type;
+use crate::engine::Engine;
+use crate::engine::ffi::{Line, MF_COUNTKILL, MF_SOLID, ML_BLOCKING, ML_MAPPED, Sector, State};
+use crate::world::observe::thing_type;
 
 pub const CELL: f64 = 16.0;
 /// How close a cell centre may be to a wall. A bit under the player's 16-unit
@@ -1399,13 +1399,6 @@ impl Level {
         }
         out
     }
-
-    pub fn door_open(&self, engine: &Engine, sector: usize) -> bool {
-        engine
-            .sectors()
-            .get(sector)
-            .is_some_and(|s| s.ceiling - s.floor >= PLAYER_HEIGHT)
-    }
 }
 
 fn join_reasons(reason: String, inner: Option<String>) -> String {
@@ -1433,6 +1426,27 @@ pub fn bearing_to(s: &State, x: f64, y: f64) -> f64 {
         b += 360.0;
     }
     b
+}
+
+/// Where the route to the current goal goes next, as shown to the model.
+#[derive(Debug, Clone, Serialize)]
+pub struct NextWaypoint {
+    pub distance: i32,
+    /// Degrees from the crosshair: positive = right.
+    pub bearing: f64,
+    pub what: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NavSummary {
+    pub goal: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_length: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<NextWaypoint>,
+    pub waypoints_left: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// Caches the level's navigation grid.

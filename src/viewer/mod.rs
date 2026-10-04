@@ -27,12 +27,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc};
 
-use crate::doom::engine::TICRATE;
-use crate::doom::ffi::{self, SCREEN_H, SCREEN_W};
-use crate::map;
-use crate::session::{NavSummary, Session};
+use crate::engine::TICRATE;
+use crate::engine::ffi::{self, SCREEN_H, SCREEN_W};
 
-const PAGE: &str = include_str!("viewer.html");
+const PAGE: &str = include_str!("page.html");
 /// Memory guard only: with nobody watching (so nothing waits for playback),
 /// frames beyond this backlog are dropped, oldest first. With a viewer
 /// connected, `wait_for_playback` keeps the backlog to about one action.
@@ -40,6 +38,12 @@ const MAX_BACKLOG: usize = TICRATE as usize * 60;
 /// Let the next action start this close to the end of the previous one's
 /// playback, so consecutive actions play back to back without a gap.
 const SYNC_SLACK: usize = TICRATE as usize / 4;
+/// Playback starts this many frames behind the game (an 86 ms jitter
+/// buffer), so a frame that arrives a little late never stalls the video.
+pub const JITTER_FRAMES: usize = 3;
+/// Playback only re-buffers after the queue has been empty this many frame
+/// periods (a real pause); shorter gaps resume as soon as a frame arrives.
+const REBUFFER_AFTER: u32 = 4;
 /// Never hold a tool call longer than this waiting for playback.
 const MAX_SYNC_WAIT: Duration = Duration::from_secs(15);
 const LOG_HISTORY: usize = 100;
@@ -66,6 +70,10 @@ pub enum LogKind {
     User,
     /// The model received the spectator's message(s).
     Delivered,
+    /// Something happened in the game (real-time mode).
+    Event,
+    /// Something important happened (real-time mode): it wakes the model up.
+    Alert,
 }
 
 #[derive(Serialize)]
@@ -75,10 +83,11 @@ struct LogLine<'a> {
 }
 
 enum Item {
-    /// A frame plus the player's (x, y, angle) when it was drawn, if in a level.
-    Frame(Vec<u32>, Option<[f64; 3]>),
+    /// A frame, the player's (x, y, angle) when it was drawn (if in a
+    /// level), and when it was drawn.
+    Frame(Vec<u32>, Option<[f64; 3]>, Instant),
     /// The same frame, encoded as its SSE event(s) by the encoder thread.
-    Encoded(Arc<str>),
+    Encoded(Arc<str>, Instant),
     Log(Arc<str>),
     /// Latest-value-wins state (level geometry, route, plan) replayed to new viewers.
     Sticky(&'static str, Arc<str>),
@@ -99,51 +108,49 @@ pub fn publish_plan(plan: &str) {
     sticky("plan", serde_json::to_string(plan).unwrap_or_default());
 }
 
-static LAST_LEVEL: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+/// A map line for the minimap: (x1, y1, x2, y2, kind) where kind is a
+/// `world::map` symbol ('#' wall, 'D' door, 'E' exit...) or '-' for an open
+/// two-sided line.
+pub type MapLine = (f64, f64, f64, f64, char);
 
-/// Send the minimap data: level geometry (when the level changes) and the
-/// current route.
-pub fn publish_status(session: &mut Session, nav: Option<&NavSummary>) {
-    if SINK.get().is_none() {
-        return;
-    }
-    let s = session.state();
-    if s.in_level == 0 || s.demoplayback != 0 || s.gamestate != 0 {
-        sticky("status", r#"{"in_level":false}"#.into());
-        return;
-    }
-    let id = (s.episode, s.map);
-    let changed = LAST_LEVEL.lock().unwrap().replace(id) != Some(id);
-    if changed {
-        let lines: Vec<(f64, f64, f64, f64, String)> = session
-            .lines()
-            .iter()
-            .map(|l| {
-                let kind = map::classify(l).unwrap_or(if l.two_sided != 0 { '-' } else { '#' });
-                (l.x1, l.y1, l.x2, l.y2, kind.to_string())
-            })
-            .collect();
-        let json = serde_json::json!({ "name": crate::observe::level_name(&s), "lines": lines });
-        sticky("level", json.to_string());
-    }
-    let route: Vec<(f64, f64)> = session
-        .route()
-        .map(|r| {
-            r.waypoints
-                .iter()
-                .map(|w| (w.x.round(), w.y.round()))
-                .collect()
-        })
-        .unwrap_or_default();
-    let json = serde_json::json!({
-        "in_level": true,
-        "goal": nav.map(|n| n.goal.clone()),
-        "route_length": nav.and_then(|n| n.route_length),
-        "note": nav.and_then(|n| n.note.clone()),
-        "route": route,
-        "player": [s.x, s.y, s.angle],
-    });
-    sticky("status", json.to_string());
+/// Show a new level's geometry on the minimap.
+pub fn publish_level(name: &str, lines: &[MapLine]) {
+    let lines: Vec<(f64, f64, f64, f64, String)> = lines
+        .iter()
+        .map(|&(x1, y1, x2, y2, k)| (x1, y1, x2, y2, k.to_string()))
+        .collect();
+    sticky(
+        "level",
+        serde_json::json!({ "name": name, "lines": lines }).to_string(),
+    );
+}
+
+/// What the minimap shows besides the level: the route, goal and player.
+#[derive(Serialize)]
+pub struct SpectatorStatus {
+    pub goal: Option<String>,
+    pub route_length: Option<i32>,
+    pub note: Option<String>,
+    pub route: Vec<(f64, f64)>,
+    pub player: [f64; 3],
+}
+
+/// Update the minimap; `None` when not in a level.
+pub fn publish_status(status: Option<&SpectatorStatus>) {
+    let json = match status {
+        Some(st) => {
+            let mut v = serde_json::to_value(st).unwrap_or_default();
+            v["in_level"] = true.into();
+            v.to_string()
+        }
+        None => r#"{"in_level":false}"#.into(),
+    };
+    sticky("status", json);
+}
+
+/// Whether the spectator page is running at all.
+pub fn enabled() -> bool {
+    SINK.get().is_some()
 }
 
 /// Everything for the page goes through here, in order: the encoder thread
@@ -154,6 +161,13 @@ static SINK: OnceLock<std::sync::mpsc::Sender<Item>> = OnceLock::new();
 static FRAMES_PENDING: AtomicUsize = AtomicUsize::new(0);
 /// Open spectator streams.
 static VIEWERS: AtomicUsize = AtomicUsize::new(0);
+
+/// Frames drawn but not yet shown, if someone is watching. The real-time
+/// game loop uses this as its clock: it runs a tic whenever the video is
+/// about to run out, so the game goes exactly as fast as the video plays.
+pub fn backlog() -> Option<usize> {
+    (VIEWERS.load(Ordering::SeqCst) > 0).then(|| FRAMES_PENDING.load(Ordering::SeqCst))
+}
 
 /// Wait (up to MAX_SYNC_WAIT) until the page has nearly caught up with the
 /// game, so the next action's frames follow straight on from the previous
@@ -171,6 +185,11 @@ pub async fn wait_for_playback() {
 /// Spectator messages waiting for the model's next tool result.
 static INBOX: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
 
+/// Whether the spectator has sent messages the model hasn't seen yet.
+pub fn has_messages() -> bool {
+    !INBOX.lock().unwrap().is_empty()
+}
+
 /// Take every message waiting for the model, oldest first, and note the
 /// delivery in the spectator log.
 pub fn take_messages() -> Vec<String> {
@@ -178,7 +197,10 @@ pub fn take_messages() -> Vec<String> {
     match messages.len() {
         0 => {}
         1 => log(LogKind::Delivered, "Claude received your message"),
-        n => log(LogKind::Delivered, &format!("Claude received your {n} messages")),
+        n => log(
+            LogKind::Delivered,
+            &format!("Claude received your {n} messages"),
+        ),
     }
     messages
 }
@@ -203,7 +225,7 @@ extern "C" fn on_frame(fb: *const u32) {
         unsafe { ffi::dmcp_state(&mut st) };
         let pos = (st.in_level != 0).then_some([st.x, st.y, st.angle]);
         FRAMES_PENDING.fetch_add(1, Ordering::SeqCst);
-        if sink.send(Item::Frame(frame, pos)).is_err() {
+        if sink.send(Item::Frame(frame, pos, Instant::now())).is_err() {
             FRAMES_PENDING.fetch_sub(1, Ordering::SeqCst);
         }
     }
@@ -266,12 +288,13 @@ pub async fn start(port: u16) -> Result<String> {
             // passing every item on in its original order.
             for item in encoder_rx {
                 let item = match item {
-                    Item::Frame(frame, pos) => {
+                    Item::Frame(frame, pos, drawn) => {
                         let mut event = frame_event(&frame);
                         if let Some([x, y, a]) = pos {
-                            event.push_str(&format!("event: pos\ndata: [{x:.0},{y:.0},{a:.1}]\n\n"));
+                            event
+                                .push_str(&format!("event: pos\ndata: [{x:.0},{y:.0},{a:.1}]\n\n"));
                         }
-                        Item::Encoded(event.into())
+                        Item::Encoded(event.into(), drawn)
                     }
                     other => other,
                 };
@@ -321,33 +344,59 @@ pub fn open_browser(url: &str) {
 async fn pace(mut rx: mpsc::UnboundedReceiver<Item>, shared: Arc<Shared>) {
     let mut queue: VecDeque<Item> = VecDeque::new();
     let mut frames_queued = 0usize;
+    // Whether playback is running, as opposed to filling the jitter buffer,
+    // and since when the queue has been out of frames.
+    let mut playing = false;
+    let mut dry_since: Option<Instant> = None;
+    let period = Duration::from_secs(1) / TICRATE;
+    // Skip keeps the deadlines anchored to the clock: timers fire up to 1 ms
+    // late, and with Delay every late tick would push the schedule back
+    // (34.5 fps instead of 35, so the video drifts ~1 s behind per minute of
+    // real-time play). Skip also doesn't burst through ticks missed while the
+    // queue was empty.
     let mut tick = tokio::time::interval(Duration::from_secs(1) / TICRATE);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
             item = rx.recv() => {
                 let Some(item) = item else { return };
-                if matches!(item, Item::Encoded(_)) {
+                if matches!(item, Item::Encoded(..)) {
                     frames_queued += 1;
                 }
                 queue.push_back(item);
                 // Memory guard (only reachable with nobody watching): drop the
                 // oldest frames, keeping the log lines.
                 while frames_queued > MAX_BACKLOG {
-                    let i = queue.iter().position(|it| matches!(it, Item::Encoded(_))).unwrap();
+                    let i = queue.iter().position(|it| matches!(it, Item::Encoded(..))).unwrap();
                     queue.remove(i);
                     frames_queued -= 1;
                     FRAMES_PENDING.fetch_sub(1, Ordering::SeqCst);
                 }
             }
             _ = tick.tick(), if !queue.is_empty() => {
+                // Fill the jitter buffer before (re)starting playback: wait for a
+                // few frames, or until the first has waited that long.
+                if dry_since.is_some_and(|t| t.elapsed() >= period * REBUFFER_AFTER) {
+                    playing = false;
+                }
+                if !playing && frames_queued > 0 {
+                    let oldest = queue.iter().find_map(|it| match it {
+                        Item::Encoded(_, drawn) => Some(*drawn),
+                        _ => None,
+                    });
+                    let waited = oldest.is_some_and(|t| t.elapsed() >= period * JITTER_FRAMES as u32);
+                    if frames_queued < JITTER_FRAMES && !waited {
+                        continue;
+                    }
+                    playing = true;
+                }
                 // Emit log lines up to and including the next frame.
                 while let Some(item) = queue.pop_front() {
                     match item {
                         Item::Log(event) => shared.log_now(event),
                         Item::Sticky(name, event) => shared.set_sticky(name, event),
-                        Item::Encoded(event) => {
+                        Item::Encoded(event, _) => {
                             frames_queued -= 1;
                             shared.set_sticky("frame", event);
                             FRAMES_PENDING.fetch_sub(1, Ordering::SeqCst);
@@ -356,6 +405,11 @@ async fn pace(mut rx: mpsc::UnboundedReceiver<Item>, shared: Arc<Shared>) {
                         // The encoder thread converts every frame before it gets here.
                         Item::Frame(..) => unreachable!("frames are encoded before pacing"),
                     }
+                }
+                if frames_queued == 0 {
+                    dry_since.get_or_insert_with(Instant::now);
+                } else {
+                    dry_since = None;
                 }
             }
         }
@@ -418,7 +472,10 @@ struct Request {
 
 impl Request {
     fn header(&self, name: &str) -> Option<&str> {
-        self.headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+        self.headers
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
     }
 }
 
@@ -470,10 +527,20 @@ async fn read_request(stream: &mut TcpStream) -> Result<Request, ReadError> {
         }
     }
     body.truncate(content_length);
-    Ok(Request { method, path, headers, body })
+    Ok(Request {
+        method,
+        path,
+        headers,
+        body,
+    })
 }
 
-async fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body: &[u8]) -> std::io::Result<()> {
+async fn respond(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+) -> std::io::Result<()> {
     let head = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
          Cache-Control: no-store\r\nConnection: close\r\n\r\n",
@@ -483,8 +550,18 @@ async fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body:
     stream.write_all(body).await
 }
 
-async fn respond_json(stream: &mut TcpStream, status: &str, json: serde_json::Value) -> std::io::Result<()> {
-    respond(stream, status, "application/json", json.to_string().as_bytes()).await
+async fn respond_json(
+    stream: &mut TcpStream,
+    status: &str,
+    json: serde_json::Value,
+) -> std::io::Result<()> {
+    respond(
+        stream,
+        status,
+        "application/json",
+        json.to_string().as_bytes(),
+    )
+    .await
 }
 
 /// Close after replying early to a request whose body we didn't read: stop
@@ -511,32 +588,70 @@ async fn handle(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
     let request = match tokio::time::timeout(REQUEST_TIMEOUT, read_request(&mut stream)).await {
         Ok(Ok(r)) => r,
         Ok(Err(ReadError::TooLarge)) => {
-            respond_json(&mut stream, "413 Payload Too Large", serde_json::json!({"error": "request too large"})).await?;
+            respond_json(
+                &mut stream,
+                "413 Payload Too Large",
+                serde_json::json!({"error": "request too large"}),
+            )
+            .await?;
             return linger(stream).await;
         }
         Ok(Err(ReadError::BadRequest)) => {
-            respond_json(&mut stream, "400 Bad Request", serde_json::json!({"error": "malformed request"})).await?;
+            respond_json(
+                &mut stream,
+                "400 Bad Request",
+                serde_json::json!({"error": "malformed request"}),
+            )
+            .await?;
             return linger(stream).await;
         }
         Ok(Err(ReadError::Io)) | Err(_) => return Ok(()),
     };
 
     // Only answer to our own host name: blocks DNS-rebinding pages.
-    if !request.header("host").is_some_and(|h| shared.hosts.iter().any(|ok| ok == h)) {
-        return respond_json(&mut stream, "403 Forbidden", serde_json::json!({"error": "unexpected host"})).await;
+    if !request
+        .header("host")
+        .is_some_and(|h| shared.hosts.iter().any(|ok| ok == h))
+    {
+        return respond_json(
+            &mut stream,
+            "403 Forbidden",
+            serde_json::json!({"error": "unexpected host"}),
+        )
+        .await;
     }
 
     match (request.method.as_str(), request.path.as_str()) {
-        ("GET", "/") => respond(&mut stream, "200 OK", "text/html; charset=utf-8", PAGE.as_bytes()).await,
+        ("GET", "/") => {
+            respond(
+                &mut stream,
+                "200 OK",
+                "text/html; charset=utf-8",
+                PAGE.as_bytes(),
+            )
+            .await
+        }
         ("GET", "/events") => stream_events(stream, shared).await,
         ("POST", "/command") => {
             let (status, json) = accept_command(&request, &shared);
             respond_json(&mut stream, status, json).await
         }
         (_, "/" | "/events" | "/command") => {
-            respond_json(&mut stream, "405 Method Not Allowed", serde_json::json!({"error": "method not allowed"})).await
+            respond_json(
+                &mut stream,
+                "405 Method Not Allowed",
+                serde_json::json!({"error": "method not allowed"}),
+            )
+            .await
         }
-        _ => respond_json(&mut stream, "404 Not Found", serde_json::json!({"error": "not found"})).await,
+        _ => {
+            respond_json(
+                &mut stream,
+                "404 Not Found",
+                serde_json::json!({"error": "not found"}),
+            )
+            .await
+        }
     }
 }
 
@@ -556,28 +671,47 @@ fn accept_command(request: &Request, shared: &Shared) -> (&'static str, serde_js
     if !token_ok {
         return forbidden("missing or wrong token; open the spectator link printed by the server");
     }
-    if !request.header("content-type").is_some_and(|ct| ct.starts_with("application/json")) {
-        return ("415 Unsupported Media Type", json!({ "error": "send JSON" }));
+    if !request
+        .header("content-type")
+        .is_some_and(|ct| ct.starts_with("application/json"))
+    {
+        return (
+            "415 Unsupported Media Type",
+            json!({ "error": "send JSON" }),
+        );
     }
     #[derive(serde::Deserialize)]
     struct Body {
         text: String,
     }
     let Ok(body) = serde_json::from_slice::<Body>(&request.body) else {
-        return ("400 Bad Request", json!({ "error": "expected {\"text\": \"...\"}" }));
+        return (
+            "400 Bad Request",
+            json!({ "error": "expected {\"text\": \"...\"}" }),
+        );
     };
     // One line of plain text: control characters (newlines included) become spaces.
-    let text: String = body.text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let text: String = body
+        .text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if text.is_empty() {
         return ("400 Bad Request", json!({ "error": "message is empty" }));
     }
     if text.chars().count() > MAX_MESSAGE_CHARS {
-        return ("400 Bad Request", json!({ "error": format!("message is longer than {MAX_MESSAGE_CHARS} characters") }));
+        return (
+            "400 Bad Request",
+            json!({ "error": format!("message is longer than {MAX_MESSAGE_CHARS} characters") }),
+        );
     }
     let mut inbox = INBOX.lock().unwrap();
     if inbox.len() >= MAX_PENDING {
-        return ("429 Too Many Requests", json!({ "error": "too many messages waiting; let Claude catch up" }));
+        return (
+            "429 Too Many Requests",
+            json!({ "error": "too many messages waiting; let Claude catch up" }),
+        );
     }
     inbox.push_back(text.clone());
     let pending = inbox.len();

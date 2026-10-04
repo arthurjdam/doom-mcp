@@ -3,9 +3,9 @@
 
 use std::fmt::Write as _;
 
-use crate::doom::Engine;
-use crate::doom::ffi::{Line, ML_BLOCKING, ML_MAPPED, ML_SECRET};
-use crate::observe;
+use crate::engine::Engine;
+use crate::engine::ffi::{Line, ML_BLOCKING, ML_MAPPED, ML_SECRET};
+use crate::world::observe;
 
 /// Smallest gap the player (56 units tall) fits through.
 const PLAYER_HEIGHT: f64 = 56.0;
