@@ -8,11 +8,8 @@
 //! first wait for the previous action to finish playing (`wait_for_playback`),
 //! so playback never falls behind and no frame is ever dropped.
 //!
-//! The page can also send short messages to the model (POST /command). They
-//! are queued here and attached to the model's next tool result. Because that
-//! text reaches the model as an instruction, the endpoint requires a random
-//! per-run token (only present in the URL we open for the user) and rejects
-//! requests from other origins or hosts.
+//! The page is read-only: it cannot send anything back to the model, so the
+//! only way to steer the game is through the MCP client.
 
 use std::collections::VecDeque;
 use std::io::Cursor;
@@ -47,13 +44,6 @@ const REBUFFER_AFTER: u32 = 4;
 /// Never hold a tool call longer than this waiting for playback.
 const MAX_SYNC_WAIT: Duration = Duration::from_secs(15);
 const LOG_HISTORY: usize = 100;
-/// Longest message the spectator may send, in characters.
-pub const MAX_MESSAGE_CHARS: usize = 500;
-/// Most messages waiting for delivery at once.
-const MAX_PENDING: usize = 20;
-/// Largest request body accepted. Leaves room for MAX_MESSAGE_CHARS characters
-/// even when every one is JSON-escaped as a surrogate pair (12 bytes each).
-const MAX_BODY: usize = 16 * 1024;
 /// How long a client may take to send its request.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -66,10 +56,6 @@ pub enum LogKind {
     Comment,
     /// What happened as a result.
     Result,
-    /// A message the spectator typed.
-    User,
-    /// The model received the spectator's message(s).
-    Delivered,
     /// Something happened in the game (real-time mode).
     Event,
     /// Something important happened (real-time mode): it wakes the model up.
@@ -182,29 +168,6 @@ pub async fn wait_for_playback() {
     }
 }
 
-/// Spectator messages waiting for the model's next tool result.
-static INBOX: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
-
-/// Whether the spectator has sent messages the model hasn't seen yet.
-pub fn has_messages() -> bool {
-    !INBOX.lock().unwrap().is_empty()
-}
-
-/// Take every message waiting for the model, oldest first, and note the
-/// delivery in the spectator log.
-pub fn take_messages() -> Vec<String> {
-    let messages: Vec<String> = INBOX.lock().unwrap().drain(..).collect();
-    match messages.len() {
-        0 => {}
-        1 => log(LogKind::Delivered, "Claude received your message"),
-        n => log(
-            LogKind::Delivered,
-            &format!("Claude received your {n} messages"),
-        ),
-    }
-    messages
-}
-
 fn log_event(kind: LogKind, text: &str) -> Arc<str> {
     let json = serde_json::to_string(&LogLine { kind, text }).unwrap_or_default();
     format!("event: log\ndata: {json}\n\n").into()
@@ -236,8 +199,6 @@ struct Shared {
     /// Latest value per sticky event name ("frame", "level", "status", "plan").
     sticky: Mutex<Vec<(&'static str, Arc<str>)>>,
     recent_logs: Mutex<VecDeque<Arc<str>>>,
-    /// Required in the X-Doom-Token header to send messages.
-    token: String,
     /// Host header values (and origins, with "http://") we answer to.
     hosts: [String; 2],
 }
@@ -266,8 +227,7 @@ impl Shared {
 }
 
 /// Start the viewer on 127.0.0.1, preferring `port`. Must be called before
-/// the engine starts. Returns the page URL, including the token that lets the
-/// page send messages to the model.
+/// the engine starts. Returns the page URL.
 pub async fn start(port: u16) -> Result<String> {
     let listener = match TcpListener::bind(("127.0.0.1", port)).await {
         Ok(l) => l,
@@ -275,8 +235,7 @@ pub async fn start(port: u16) -> Result<String> {
         Err(_) => TcpListener::bind(("127.0.0.1", 0)).await?,
     };
     let port = listener.local_addr()?.port();
-    let token = random_token()?;
-    let url = format!("http://127.0.0.1:{port}/?token={token}");
+    let url = format!("http://127.0.0.1:{port}/");
 
     let (tx, encoder_rx) = std::sync::mpsc::channel::<Item>();
     let (pace_tx, rx) = mpsc::unbounded_channel();
@@ -309,7 +268,6 @@ pub async fn start(port: u16) -> Result<String> {
         events: broadcast::channel(512).0,
         sticky: Mutex::new(Vec::new()),
         recent_logs: Mutex::new(VecDeque::new()),
-        token,
         hosts: [format!("127.0.0.1:{port}"), format!("localhost:{port}")],
     });
     tokio::spawn(pace(rx, shared.clone()));
@@ -449,25 +407,11 @@ async fn serve(listener: TcpListener, shared: Arc<Shared>) {
     }
 }
 
-/// 128 random bits as hex, from the OS.
-fn random_token() -> Result<String> {
-    use std::io::Read;
-    let mut bytes = [0u8; 16];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
-}
-
-/// Compare secrets without an early exit on the first differing byte.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
-
 struct Request {
     method: String,
     path: String,
     /// Header names are lowercased.
     headers: Vec<(String, String)>,
-    body: Vec<u8>,
 }
 
 impl Request {
@@ -515,23 +459,14 @@ async fn read_request(stream: &mut TcpStream) -> Result<Request, ReadError> {
         Some((_, v)) => v.parse::<usize>().map_err(|_| ReadError::BadRequest)?,
         None => 0,
     };
-    if content_length > MAX_BODY {
+    // Every endpoint is a GET; nothing here accepts a body.
+    if content_length > 0 {
         return Err(ReadError::TooLarge);
     }
-    let mut body = buf[head_end + 4..len].to_vec();
-    while body.len() < content_length {
-        let mut chunk = vec![0u8; content_length - body.len()];
-        match stream.read(&mut chunk).await {
-            Ok(0) | Err(_) => return Err(ReadError::Io),
-            Ok(n) => body.extend_from_slice(&chunk[..n]),
-        }
-    }
-    body.truncate(content_length);
     Ok(Request {
         method,
         path,
         headers,
-        body,
     })
 }
 
@@ -632,11 +567,7 @@ async fn handle(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
             .await
         }
         ("GET", "/events") => stream_events(stream, shared).await,
-        ("POST", "/command") => {
-            let (status, json) = accept_command(&request, &shared);
-            respond_json(&mut stream, status, json).await
-        }
-        (_, "/" | "/events" | "/command") => {
+        (_, "/" | "/events") => {
             respond_json(
                 &mut stream,
                 "405 Method Not Allowed",
@@ -653,73 +584,6 @@ async fn handle(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
             .await
         }
     }
-}
-
-/// Validate a spectator message and queue it for the model.
-fn accept_command(request: &Request, shared: &Shared) -> (&'static str, serde_json::Value) {
-    use serde_json::json;
-    let forbidden = |why: &str| ("403 Forbidden", json!({ "error": why }));
-    // Browsers always send Origin on POST; it must be this page.
-    if let Some(origin) = request.header("origin")
-        && !shared.hosts.iter().any(|h| origin == format!("http://{h}"))
-    {
-        return forbidden("cross-origin requests are not allowed");
-    }
-    let token_ok = request
-        .header("x-doom-token")
-        .is_some_and(|t| constant_time_eq(t.as_bytes(), shared.token.as_bytes()));
-    if !token_ok {
-        return forbidden("missing or wrong token; open the spectator link printed by the server");
-    }
-    if !request
-        .header("content-type")
-        .is_some_and(|ct| ct.starts_with("application/json"))
-    {
-        return (
-            "415 Unsupported Media Type",
-            json!({ "error": "send JSON" }),
-        );
-    }
-    #[derive(serde::Deserialize)]
-    struct Body {
-        text: String,
-    }
-    let Ok(body) = serde_json::from_slice::<Body>(&request.body) else {
-        return (
-            "400 Bad Request",
-            json!({ "error": "expected {\"text\": \"...\"}" }),
-        );
-    };
-    // One line of plain text: control characters (newlines included) become spaces.
-    let text: String = body
-        .text
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if text.is_empty() {
-        return ("400 Bad Request", json!({ "error": "message is empty" }));
-    }
-    if text.chars().count() > MAX_MESSAGE_CHARS {
-        return (
-            "400 Bad Request",
-            json!({ "error": format!("message is longer than {MAX_MESSAGE_CHARS} characters") }),
-        );
-    }
-    let mut inbox = INBOX.lock().unwrap();
-    if inbox.len() >= MAX_PENDING {
-        return (
-            "429 Too Many Requests",
-            json!({ "error": "too many messages waiting; let Claude catch up" }),
-        );
-    }
-    inbox.push_back(text.clone());
-    let pending = inbox.len();
-    drop(inbox);
-    // Through the paced queue, so it lands after the moves still being replayed:
-    // that's when the model will actually see it. (The page confirms instantly.)
-    log(LogKind::User, &text);
-    ("200 OK", json!({ "ok": true, "pending": pending }))
 }
 
 /// Counts an open spectator stream for as long as it lives.

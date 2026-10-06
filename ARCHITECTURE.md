@@ -22,7 +22,7 @@ doom-mcp lets an AI play DOOM over MCP. It has two modes that share one core:
                └─────┬─────┘
           ┌──────────┼──────────┐
        ┌──┴──┐   ┌───┴───┐  ┌───┴────┐
-       │pilot│──▶│ world │  │ viewer │◀── frames, log, status, spectator messages
+       │pilot│──▶│ world │  │ viewer │◀── frames, log, status
        └──┬──┘   └───┬───┘  └────────┘
           └────┬─────┘
            ┌───┴────┐
@@ -60,8 +60,8 @@ Each layer only uses the layers below it.
   (`aggressive`, `balanced`, `cautious`, `hold_fire`), focus target, whether to move, and a
   one-shot `use`.
 - **Events** go into the session's `EventLog` with a sequence number. Examples: a monster
-  spotted, damage taken, a kill, a pickup, arrived, blocked, low health, died, level complete,
-  and spectator messages. Important events wake up `wait_for_events` early.
+  spotted, damage taken, a kill, a pickup, arrived, blocked, low health, died, level complete.
+  Important events wake up `wait_for_events` early.
 - The **turn-based** `follow_route` uses the same `pilot::travel` logic, stepped tic by tic until
   something needs the model, so there is a single implementation of route following.
 
@@ -91,5 +91,4 @@ exactly one tic per step (Doom's `singletics` mode), so one step is one tic and 
 
 The same in both modes. Frames are paced to 35 fps. In turn-based mode, game-advancing tools
 wait for playback to catch up. In real-time mode the game already runs at playback speed.
-Spectator messages are delivered at the top of the next tool result, and in real-time mode they
-also wake `wait_for_events`.
+The page is read-only: it never sends anything to the model.

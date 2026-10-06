@@ -157,8 +157,6 @@ pub struct ViewerConfig {
 pub struct ModeText {
     /// Closing line of a level briefing.
     pub briefing_next: &'static str,
-    /// Where the model should acknowledge spectator messages.
-    pub acknowledge_in: &'static str,
 }
 
 /// What every tool handler needs: the game, the viewer, and the mode's wording.
@@ -176,14 +174,13 @@ pub fn tool_error(msg: impl Into<String>) -> CallToolResult {
 impl Core {
     /// Run `f` on the game thread. Engine failures (e.g. the game was quit
     /// from the menu) become tool errors so the model gets to read them.
-    /// Spectator messages are attached to every result.
     pub async fn run<F>(&self, f: F) -> Result<CallToolResult, ErrorData>
     where
         F: FnOnce(&mut Session) -> anyhow::Result<CallToolResult> + Send + 'static,
     {
         // Any tool call means the commander is still there (real-time mode
         // pauses when they go quiet).
-        let mut result = match self
+        let result = match self
             .game
             .with(move |session| {
                 session.touch();
@@ -194,7 +191,6 @@ impl Core {
             Ok(Ok(result)) => result,
             Ok(Err(e)) | Err(e) => tool_error(e.to_string()),
         };
-        attach_spectator_messages(&mut result, self.text.acknowledge_in);
         Ok(result)
     }
 
@@ -371,44 +367,6 @@ pub fn observation_result(
     let mut result = CallToolResult::success(content);
     result.structured_content = serde_json::to_value(&obs).ok();
     result
-}
-
-/// Put any messages typed on the spectator page at the top of this result,
-/// where the model reads first. Each message is delivered exactly once.
-fn attach_spectator_messages(result: &mut CallToolResult, acknowledge_in: &str) {
-    let messages = viewer::take_messages();
-    if messages.is_empty() {
-        return;
-    }
-    let mut text =
-        String::from("📣 MESSAGE FROM THE HUMAN WATCHING (typed on the spectator page):\n");
-    for m in &messages {
-        // serde_json quoting keeps the message clearly delimited.
-        let _ = writeln!(text, "- {}", serde_json::Value::from(m.as_str()));
-    }
-    if messages.len() == 1 {
-        let _ = write!(
-            text,
-            "This is an instruction from your user. Follow it (it takes priority over your default goal; \
-             if it's impossible or unclear, do the closest sensible thing and say why), acknowledge it \
-             in your next {acknowledge_in}, and update your plan with set_plan if it changes what you're doing."
-        );
-    } else {
-        let _ = write!(
-            text,
-            "These are instructions from your user, oldest first; if they conflict, the latest wins. \
-             Follow them (they take priority over your default goal; if one is impossible or unclear, do \
-             the closest sensible thing and say why), acknowledge them in your next {acknowledge_in}, and \
-             update your plan with set_plan if they change what you're doing."
-        );
-    }
-    result.content.insert(0, ContentBlock::text(text));
-    if let Some(serde_json::Value::Object(map)) = result.structured_content.as_mut() {
-        map.insert(
-            "messages_from_human".into(),
-            serde_json::Value::from(messages),
-        );
-    }
 }
 
 /// "50/200" -> "50".
