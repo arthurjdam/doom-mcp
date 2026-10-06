@@ -61,16 +61,9 @@ browser automatically the first time the model calls `new_game`. It shows:
 - an action log showing what the model did, with the outcome (health, ammo, kills, damage);
 - the model's own narration, if it passes `act`'s optional `comment`.
 
-**Telling Claude what to do.** Type into the box under the video ("take the left door",
-"shoot all the barrels"). The message is queued and placed at the top of Claude's next tool
-result, marked `📣 MESSAGE FROM THE HUMAN WATCHING`. Claude is instructed to treat it as an
-instruction from you that overrides its default goal, acknowledge it, and update its plan.
-The log shows your message, then a ✓ once Claude has received it.
-
-Because this text steers the agent, the endpoint (`POST /command`) is locked down. It needs a
-random per-run token that is only in the link the server opens for you (`/?token=…`); requests
-from any other origin or `Host` are refused, and so are non-JSON bodies. Messages are limited to
-one line of 500 characters, with at most 20 waiting. The page itself only listens on 127.0.0.1.
+The page is read-only. To steer Claude ("take the left door", "shoot all the barrels"), just
+tell it in your MCP client; in real-time mode it checks in every few seconds, so it picks the
+message up quickly.
 
 The game only advances while the model is acting, so the video plays each action back in real
 time (every frame, at 35 fps) and holds on the last frame while the model is thinking. One game
@@ -103,7 +96,7 @@ The model commands with these tools:
 |---|---|
 | `new_game` | Start a game; the result has the level briefing. |
 | `command` | Standing orders: navigation `goal` (same goals as `route`), `stance` (`aggressive`, `balanced`, `cautious`, `hold_fire`), `focus` a target, `travel: false` to hold position, a preferred `weapon`, or `use` now. Only the fields given change. |
-| `wait_for_events` | Waits up to `timeout_seconds` and returns early on anything important (level start or end, low health, death, stuck, a big monster, a spectator message). Returns every event since the last call plus a status summary. |
+| `wait_for_events` | Waits up to `timeout_seconds` and returns early on anything important (level start or end, low health, death, stuck, a big monster). Returns every event since the last call plus a status summary. |
 | `observe`, `set_plan`, `get_map`, `press_keys` | As in turn-based mode. |
 
 If the model makes no tool calls for 60 s, the game pauses until the next call. Playing E1M1 on

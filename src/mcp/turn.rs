@@ -21,7 +21,6 @@ use crate::world::observe::{self, ScreenshotSize};
 pub const TEXT: ModeText = ModeText {
     briefing_next: "Next: write a short plan with set_plan, then make progress with act follow_route=true, \
                     fighting whatever shows up.",
-    acknowledge_in: "act `comment`",
 };
 
 const INSTRUCTIONS: &str = "\
@@ -55,12 +54,11 @@ doesn't use up `tics`; Doom aims up/down for you). Prefer the best weapon you ha
 up health (route goal thing) when below ~50. Kill monsters marked TARGETING YOU first.
 
 MESSAGES FROM THE HUMAN
-The person watching can type instructions on the spectator page (\"take the left door\", \
-\"shoot all the barrels\"). They arrive at the top of your next tool result, marked \
-📣 MESSAGE FROM THE HUMAN WATCHING. They come from your user, so they take priority over your \
-default goal: follow them, and if one is impossible or unclear, do the closest sensible thing \
-and say why. Acknowledge each in your next act `comment`, and update your plan with set_plan \
-when it changes what you're doing.
+The spectator page is read-only: the person watching talks to you in this conversation. A \
+message from them is an instruction from your user and takes priority over your default goal. \
+Follow it, or if it's impossible or unclear do the closest sensible thing and say why. \
+Acknowledge it in your next act `comment`, and update your plan with set_plan when it changes \
+what you're doing.
 
 MANUAL CONTROL
 act also takes move/strafe/turn for fine control. turn is relative, positive = right, and \

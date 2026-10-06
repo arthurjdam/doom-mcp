@@ -15,8 +15,6 @@
     --comment: #f2c14e;
     --ok: #4caf50;
     --route: #f2c14e;
-    --user: #7fb3ff;
-    --error: #ff6b5b;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
@@ -37,15 +35,6 @@
   .now { margin-top: 12px; min-height: 2.9em; padding: 8px 12px; background: var(--panel);
     border: 1px solid var(--border); border-radius: 4px; color: var(--comment); }
   .now:empty::before { content: "Waiting for Claude to make a move…"; color: var(--muted); }
-
-  .tell { display: flex; gap: 8px; margin-top: 10px; }
-  .tell input { flex: 1; min-width: 0; font: inherit; color: var(--text); background: var(--panel);
-    border: 1px solid var(--border); border-radius: 4px; padding: 8px 12px; outline: none; }
-  .tell input:focus { border-color: var(--user); }
-  .tell input:disabled { opacity: .6; }
-  .tell button { font-size: 13px; padding: 0 16px; }
-  .tell-status { min-height: 1.4em; margin-top: 4px; font-size: 12px; color: var(--muted); }
-  .tell-status.error { color: var(--error); }
 
   aside { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
   .panel { display: flex; flex-direction: column; min-height: 0; background: var(--panel);
@@ -76,15 +65,10 @@
   #log li.comment { color: var(--comment); }
   #log li.comment::before { content: "💬 "; }
   #log li.result { color: var(--muted); font-size: 12.5px; }
-  #log li.user { color: var(--user); font-weight: 600; border-top: 1px solid var(--border);
-    padding-top: 8px; margin-top: 4px; }
-  #log li.user::before { content: "🧑 You: "; }
-  #log li.delivered { color: var(--muted); font-size: 12px; }
   #log li.event { color: var(--muted); font-size: 12px; }
   #log li.event::before { content: "· "; }
   #log li.alert { color: var(--text); font-size: 12.5px; white-space: pre-wrap; }
   #log li.alert::before { content: "⚠ "; color: var(--comment); }
-  #log li.delivered::before { content: "✓ "; color: var(--ok); }
 
   @media (max-width: 900px) {
     .app { grid-template-columns: 1fr; height: auto; }
@@ -102,11 +86,6 @@
     </header>
     <div class="screen-wrap"><canvas id="screen" width="320" height="200"></canvas></div>
     <div class="now" id="now"></div>
-    <form class="tell" id="tell" autocomplete="off">
-      <input id="tell-text" maxlength="500" placeholder="Tell Claude what to do… (e.g. take the left door)">
-      <button type="submit" id="tell-send">Send</button>
-    </form>
-    <div class="tell-status" id="tell-status"></div>
   </section>
   <aside>
     <div class="panel">
@@ -155,47 +134,6 @@
     if (atBottom) log.scrollTop = log.scrollHeight;
     if (entry.kind === "comment" && entry.text !== "Updated the plan") now.textContent = entry.text;
   }
-
-  // ---- Messages to Claude ----
-  // The token comes from the link the server opened; without it the server
-  // refuses messages (so other web pages can't steer the agent).
-  const token = new URLSearchParams(location.search).get("token");
-  const tellText = $("tell-text"), tellSend = $("tell-send"), tellStatus = $("tell-status");
-  function setTellStatus(text, isError) {
-    tellStatus.textContent = text;
-    tellStatus.classList.toggle("error", !!isError);
-  }
-  if (!token) {
-    tellText.disabled = tellSend.disabled = true;
-    tellText.placeholder = "Open the spectator link from the server (it includes ?token=…) to send messages";
-  }
-  $("tell").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const text = tellText.value.trim();
-    if (!text || !token) return;
-    tellSend.disabled = true;
-    try {
-      const res = await fetch("/command", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Doom-Token": token },
-        body: JSON.stringify({ text }),
-      });
-      const body = await res.json().catch(() => ({}));
-      if (res.ok) {
-        tellText.value = "";
-        setTellStatus(body.pending > 1
-          ? `Sent. ${body.pending} messages waiting for Claude's next move.`
-          : "Sent. Claude will see it on its next move.");
-      } else {
-        setTellStatus(body.error || `Couldn't send (HTTP ${res.status})`, true);
-      }
-    } catch (err) {
-      setTellStatus("Couldn't reach the Doom server. Is it still running?", true);
-    } finally {
-      tellSend.disabled = false;
-      tellText.focus();
-    }
-  });
 
   // ---- Minimap ----
   const map = $("map"), mctx = map.getContext("2d");

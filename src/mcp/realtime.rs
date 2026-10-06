@@ -37,8 +37,7 @@ LOOP
 switches needed, monsters).
 2. Write a short plan with set_plan; keep it current.
 3. Call wait_for_events (timeout 10-20 s). It returns as soon as something important happens \
-(level start or completion, low health, death, getting stuck, a big monster, a message from the \
-human) or when the timeout ends, with everything since your last call and the current status.
+(level start or completion, low health, death, getting stuck, a big monster) or when the timeout ends, with everything since your last call and the current status.
 4. React with command: a new navigation goal (a key, a switch, explore, a health pickup by thing \
 id, the exit), a stance (aggressive / balanced / cautious / hold_fire), a focus target, holding \
 position, a preferred weapon, or pressing use. Orders last until you change them. Then call \
@@ -50,17 +49,17 @@ the human's requests. observe gives the full picture with a screenshot; get_map 
 map. press_keys is for menus only.
 
 MESSAGES FROM THE HUMAN
-The person watching can type instructions on the spectator page. They arrive at the top of \
-your next tool result (and wake wait_for_events), marked 📣 MESSAGE FROM THE HUMAN WATCHING. \
-They come from your user, so they take priority over your default goal: carry them out with \
-command, and if one is impossible or unclear, do the closest sensible thing and say why. \
-Acknowledge each in your next command `comment`, and update your plan with set_plan when it \
-changes what you're doing.";
+The spectator page is read-only: the person watching talks to you in this conversation. Their \
+messages are instructions from your user and take priority over your default goal: carry them \
+out with command, and if one is impossible or unclear, do the closest sensible thing and say \
+why. Acknowledge each in your next command `comment`, and update your plan with set_plan when it \
+changes what you're doing. Their message can only reach you between tool calls, so keep \
+wait_for_events timeouts short (10 s or less) while the human is actively giving directions; \
+you'll then see it within seconds instead of at the end of a long wait.";
 
 pub const TEXT: ModeText = ModeText {
     briefing_next: "The pilot is heading for the exit. Adjust with command (goal, stance, focus) and keep \
                     your plan current with set_plan.",
-    acknowledge_in: "command `comment`",
 };
 
 fn default_timeout() -> f64 {
@@ -390,7 +389,7 @@ impl RealtimeServer {
                 })
                 .await
                 .unwrap_or(true);
-            if important || viewer::has_messages() || Instant::now() >= deadline {
+            if important || Instant::now() >= deadline {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
