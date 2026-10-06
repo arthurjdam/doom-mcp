@@ -61,7 +61,7 @@ browser automatically the first time the model calls `new_game`. It shows:
 - an action log showing what the model did, with the outcome (health, ammo, kills, damage);
 - the model's own narration, if it passes `act`'s optional `comment`.
 
-The page is read-only. To steer Claude ("take the left door", "shoot all the barrels"), just
+The page is read-only (and styled as a retro terminal, with bundled pixel fonts so it works offline). To steer Claude ("take the left door", "shoot all the barrels"), just
 tell it in your MCP client; in real-time mode it checks in every few seconds, so it picks the
 message up quickly.
 

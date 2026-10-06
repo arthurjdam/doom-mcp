@@ -3,72 +3,95 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DOOM · spectator</title>
+<title>DOOM // spectator</title>
 <style>
+  @font-face { font-family: "Press Start 2P"; src: url(/fonts/PressStart2P.ttf) format("truetype"); font-display: block; }
+  @font-face { font-family: "VT323"; src: url(/fonts/VT323.ttf) format("truetype"); font-display: block; }
   :root {
-    --bg: #0d0d0f;
-    --panel: #16161a;
-    --border: #2a2a30;
-    --text: #e6e6e6;
-    --muted: #8b8b95;
-    --accent: #e8452c;
-    --comment: #f2c14e;
-    --ok: #4caf50;
-    --route: #f2c14e;
+    --bg: #070807;
+    --panel: #0d0f0d;
+    --border: #2b322c;
+    --border-hi: #8a9a8c;
+    --text: #d4dccf;
+    --muted: #6b7a6e;
+    --accent: #ff3b5c;
+    --comment: #ffb000;
+    --ok: #39ff88;
+    --route: #ffb000;
+    --pixel: "Press Start 2P", "VT323", monospace;
+    --mono: "VT323", "Press Start 2P", monospace;
   }
-  * { box-sizing: border-box; }
+  * { box-sizing: border-box; border-radius: 0 !important; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
-    font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-  .app { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px;
-    height: 100%; padding: 16px; }
+    font: 19px/1.15 var(--mono); -webkit-font-smoothing: none; font-smooth: never; }
+  /* CRT scanlines over everything */
+  body::after { content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 10;
+    background: repeating-linear-gradient(to bottom, rgba(0,0,0,0) 0 2px, rgba(0,0,0,.22) 2px 3px); }
+  .app { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 14px;
+    height: 100%; padding: 14px; }
   .stage { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-  header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
-  h1 { margin: 0; font-size: 15px; letter-spacing: .08em; text-transform: uppercase; }
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; padding-bottom: 10px;
+    border-bottom: 2px solid var(--border); }
+  h1 { margin: 0; font: 12px/1 var(--pixel); letter-spacing: .04em; text-transform: uppercase;
+    color: var(--text); }
   h1 span { color: var(--accent); }
-  .status { margin-left: auto; display: flex; align-items: center; gap: 6px;
-    color: var(--muted); font-size: 12px; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
-  .dot.live { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  h1::before { content: "> "; color: var(--ok); }
+  .status { margin-left: auto; display: flex; align-items: center; gap: 8px;
+    color: var(--muted); font: 9px/1 var(--pixel); text-transform: uppercase; }
+  .dot { width: 8px; height: 8px; background: var(--muted); }
+  .dot.live { background: var(--ok); box-shadow: 0 0 6px var(--ok); animation: blink 1.4s steps(2, jump-none) infinite; }
+  @keyframes blink { 50% { opacity: .35; } }
   .screen-wrap { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
   #screen { display: block; width: 100%; max-height: 100%; aspect-ratio: 4 / 3; object-fit: fill;
-    image-rendering: pixelated; background: #000; border: 1px solid var(--border); border-radius: 4px; }
-  .now { margin-top: 12px; min-height: 2.9em; padding: 8px 12px; background: var(--panel);
-    border: 1px solid var(--border); border-radius: 4px; color: var(--comment); }
-  .now:empty::before { content: "Waiting for Claude to make a move…"; color: var(--muted); }
+    image-rendering: pixelated; background: #000; border: 2px solid var(--border-hi);
+    box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--border); }
+  .now { margin-top: 14px; min-height: 3.2em; padding: 8px 12px; background: var(--panel);
+    border: 2px solid var(--border); border-left: 6px solid var(--comment); color: var(--comment);
+    font-size: 21px; }
+  .now:empty::before { content: "AWAITING INPUT_"; color: var(--muted); }
 
-  aside { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+  aside { display: flex; flex-direction: column; gap: 14px; min-height: 0; }
   .panel { display: flex; flex-direction: column; min-height: 0; background: var(--panel);
-    border: 1px solid var(--border); border-radius: 4px; }
-  .panel h2 { display: flex; align-items: center; gap: 8px; margin: 0; padding: 8px 12px;
-    font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
-    color: var(--muted); border-bottom: 1px solid var(--border); }
-  .panel h2 .extra { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 400; }
-  button { font: inherit; font-size: 11px; color: var(--text); background: #222228;
-    border: 1px solid var(--border); border-radius: 3px; padding: 2px 8px; cursor: pointer; }
-  button:hover { border-color: var(--muted); }
+    border: 2px solid var(--border); }
+  .panel h2 { display: flex; align-items: center; gap: 8px; margin: 0; padding: 9px 10px;
+    font: 9px/1 var(--pixel); letter-spacing: .04em; text-transform: uppercase;
+    color: var(--ok); background: rgba(255,255,255,.04); border-bottom: 2px solid var(--border); }
+  .panel h2::before { content: "["; color: var(--muted); }
+  .panel h2::after { content: "]"; color: var(--muted); order: 1; }
+  .panel h2 #level-name { color: var(--muted); }
+  .panel h2 .extra { margin-left: auto; order: 2; }
+  button { font: 8px/1 var(--pixel); text-transform: uppercase; color: var(--ok);
+    background: transparent; border: 2px solid var(--border); padding: 5px 7px; cursor: pointer; }
+  button:hover { color: var(--bg); background: var(--ok); border-color: var(--ok); }
 
-  #map { display: block; width: 100%; height: 240px; background: #0a0a0c; border-radius: 0 0 4px 4px; }
-  .goal { padding: 6px 12px; font-size: 12.5px; color: var(--muted); border-top: 1px solid var(--border); }
-  .goal b { color: var(--route); font-weight: 600; }
+  #map { display: block; width: 100%; height: 240px; background: #060706;
+    background-image: linear-gradient(rgba(255,255,255,.04) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.04) 1px, transparent 1px);
+    background-size: 20px 20px; }
+  .goal { padding: 6px 10px; color: var(--muted); border-top: 2px solid var(--border); }
+  .goal b { color: var(--route); font-weight: 400; text-transform: uppercase; }
   .goal:empty { display: none; }
 
-  #plan { margin: 0; padding: 8px 12px; max-height: 160px; overflow-y: auto; white-space: pre-wrap;
-    font: 12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
-  #plan:empty::before { content: "No plan yet."; color: var(--muted); font-family: ui-sans-serif, system-ui, sans-serif; }
+  #plan { margin: 0; padding: 8px 10px; max-height: 170px; overflow-y: auto; white-space: pre-wrap;
+    font: 19px/1.15 var(--mono); }
+  #plan:empty::before { content: "NO PLAN LOADED"; color: var(--muted); }
 
   .log-panel { flex: 1; }
-  #log { flex: 1; overflow-y: auto; padding: 8px 12px; margin: 0; list-style: none; min-height: 120px; }
-  #log li { padding: 4px 0; white-space: pre-wrap; word-break: break-word; }
-  #log li.action { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
-    border-top: 1px solid var(--border); padding-top: 8px; margin-top: 4px; }
-  #log li.action::before { content: "▶ "; color: var(--accent); }
+  #log { flex: 1; overflow-y: auto; padding: 8px 10px; margin: 0; list-style: none; min-height: 120px; }
+  #log li { padding: 3px 0; white-space: pre-wrap; word-break: break-word; }
+  #log li.action { color: var(--text); border-top: 1px dashed var(--border); padding-top: 7px; margin-top: 4px; }
+  #log li.action::before { content: "> "; color: var(--accent); }
   #log li.comment { color: var(--comment); }
-  #log li.comment::before { content: "💬 "; }
-  #log li.result { color: var(--muted); font-size: 12.5px; }
-  #log li.event { color: var(--muted); font-size: 12px; }
-  #log li.event::before { content: "· "; }
-  #log li.alert { color: var(--text); font-size: 12.5px; white-space: pre-wrap; }
-  #log li.alert::before { content: "⚠ "; color: var(--comment); }
+  #log li.comment::before { content: "// "; }
+  #log li.result { color: var(--muted); }
+  #log li.result::before { content: "  = "; }
+  #log li.event { color: var(--muted); }
+  #log li.event::before { content: "- "; }
+  #log li.alert { color: var(--accent); }
+  #log li.alert::before { content: "! "; }
+
+  /* thin square scrollbars */
+  * { scrollbar-width: thin; scrollbar-color: var(--border) var(--bg); }
 
   @media (max-width: 900px) {
     .app { grid-template-columns: 1fr; height: auto; }
@@ -81,24 +104,24 @@
 <div class="app">
   <section class="stage">
     <header>
-      <h1><span>DOOM</span> · Claude is playing</h1>
-      <div class="status"><div class="dot" id="dot"></div><span id="conn">connecting…</span></div>
+      <h1><span>DOOM</span>.EXE // CLAUDE PLAYING</h1>
+      <div class="status"><div class="dot" id="dot"></div><span id="conn">connecting</span></div>
     </header>
     <div class="screen-wrap"><canvas id="screen" width="320" height="200"></canvas></div>
     <div class="now" id="now"></div>
   </section>
   <aside>
     <div class="panel">
-      <h2>Map <span id="level-name"></span><span class="extra"><button id="zoom">Whole level</button></span></h2>
+      <h2>Map<span id="level-name"></span><span class="extra"><button id="zoom">Whole level</button></span></h2>
       <canvas id="map"></canvas>
       <div class="goal" id="goal"></div>
     </div>
     <div class="panel">
-      <h2>Claude's plan</h2>
+      <h2>Plan</h2>
       <pre id="plan"></pre>
     </div>
     <div class="panel log-panel">
-      <h2>Action log</h2>
+      <h2>Log</h2>
       <ul id="log"></ul>
     </div>
   </aside>
@@ -138,8 +161,8 @@
   // ---- Minimap ----
   const map = $("map"), mctx = map.getContext("2d");
   const LINE_STYLE = {
-    "#": ["#7d7d88", 1], "%": ["#6b5a3a", 1], "-": ["#2c2c33", 1], ".": ["#2c2c33", 1],
-    "D": ["#c9a227", 2], "K": ["#4aa3ff", 2.5], "L": ["#3cc7c7", 2], "S": ["#6fd26f", 2.5], "E": ["#ff4d3a", 3.5],
+    "#": ["#8a9a8c", 1], "%": ["#5d6b5f", 1], "-": ["#2b322c", 1], ".": ["#2b322c", 1],
+    "D": ["#ffb000", 2], "K": ["#5c8bff", 2.5], "L": ["#c46bff", 2], "S": ["#39ff88", 2.5], "E": ["#ff3b5c", 3.5],
   };
   let level = null, route = [], player = null, wholeLevel = false;
 
@@ -192,17 +215,15 @@
     if (player && route.length) {
       mctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--route");
       mctx.lineWidth = 2 * dpr;
-      mctx.setLineDash([5 * dpr, 4 * dpr]);
+      mctx.setLineDash([4 * dpr, 4 * dpr]);
       mctx.beginPath();
       mctx.moveTo(X(player[0]), Y(player[1]));
       for (const [x, y] of route) mctx.lineTo(X(x), Y(y));
       mctx.stroke();
       mctx.setLineDash([]);
       const [gx, gy] = route[route.length - 1];
-      mctx.fillStyle = "#f2c14e";
-      mctx.beginPath();
-      mctx.arc(X(gx), Y(gy), 4.5 * dpr, 0, Math.PI * 2);
-      mctx.fill();
+      mctx.fillStyle = "#ffb000";
+      mctx.fillRect(X(gx) - 4.5 * dpr, Y(gy) - 4.5 * dpr, 9 * dpr, 9 * dpr);
     }
     if (player) {
       const [px, py, a] = player;
@@ -210,8 +231,8 @@
       const tip = [X(px) + Math.cos(r) * s * 1.4, Y(py) - Math.sin(r) * s * 1.4];
       const l = [X(px) + Math.cos(r + 2.5) * s, Y(py) - Math.sin(r + 2.5) * s];
       const rr = [X(px) + Math.cos(r - 2.5) * s, Y(py) - Math.sin(r - 2.5) * s];
-      mctx.fillStyle = "#4caf50";
-      mctx.strokeStyle = "#0a0a0c";
+      mctx.fillStyle = "#39ff88";
+      mctx.strokeStyle = "#060706";
       mctx.lineWidth = 1.5 * dpr;
       mctx.beginPath();
       mctx.moveTo(...tip); mctx.lineTo(...l); mctx.lineTo(...rr); mctx.closePath();
@@ -222,7 +243,7 @@
   function setLevel(data) {
     const xs = data.lines.flatMap((l) => [l[0], l[2]]), ys = data.lines.flatMap((l) => [l[1], l[3]]);
     level = { lines: data.lines, bounds: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)] };
-    $("level-name").textContent = "· " + data.name;
+    $("level-name").textContent = " " + data.name;
     redraw();
   }
 
@@ -233,7 +254,7 @@
     player = st.player;
     goal.replaceChildren();
     if (st.goal) {
-      goal.append("Heading to ");
+      goal.append("TARGET: ");
       const b = document.createElement("b");
       b.textContent = st.goal;
       goal.append(b);
@@ -253,8 +274,8 @@
   // ---- Event stream ----
   const es = new EventSource("/events");
   // The server replays recent history on every (re)connect.
-  es.onopen = () => { log.replaceChildren(); $("dot").classList.add("live"); $("conn").textContent = "live"; };
-  es.onerror = () => { $("dot").classList.remove("live"); $("conn").textContent = "reconnecting…"; };
+  es.onopen = () => { log.replaceChildren(); $("dot").classList.add("live"); $("conn").textContent = "link up"; };
+  es.onerror = () => { $("dot").classList.remove("live"); $("conn").textContent = "relinking…"; };
   es.addEventListener("frame", (e) => draw("data:image/png;base64," + e.data));
   es.addEventListener("pos", (e) => { player = JSON.parse(e.data); redraw(); });
   es.addEventListener("log", (e) => addLog(JSON.parse(e.data)));
