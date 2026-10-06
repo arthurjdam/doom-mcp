@@ -28,6 +28,9 @@ use crate::engine::TICRATE;
 use crate::engine::ffi::{self, SCREEN_H, SCREEN_W};
 
 const PAGE: &str = include_str!("page.html");
+/// Pixel fonts (SIL OFL, see fonts/OFL.txt), served locally so the page works offline.
+const FONT_PRESS_START: &[u8] = include_bytes!("fonts/PressStart2P.ttf");
+const FONT_VT323: &[u8] = include_bytes!("fonts/VT323.ttf");
 /// Memory guard only: with nobody watching (so nothing waits for playback),
 /// frames beyond this backlog are dropped, oldest first. With a viewer
 /// connected, `wait_for_playback` keeps the backlog to about one action.
@@ -567,7 +570,11 @@ async fn handle(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
             .await
         }
         ("GET", "/events") => stream_events(stream, shared).await,
-        (_, "/" | "/events") => {
+        ("GET", "/fonts/PressStart2P.ttf") => {
+            respond(&mut stream, "200 OK", "font/ttf", FONT_PRESS_START).await
+        }
+        ("GET", "/fonts/VT323.ttf") => respond(&mut stream, "200 OK", "font/ttf", FONT_VT323).await,
+        (_, "/" | "/events" | "/fonts/PressStart2P.ttf" | "/fonts/VT323.ttf") => {
             respond_json(
                 &mut stream,
                 "405 Method Not Allowed",
